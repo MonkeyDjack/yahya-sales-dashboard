@@ -580,7 +580,7 @@ c3.metric("Средняя цена", money(avg_price))
 
 st.divider()
 
-st.markdown("### ABC анализ (отчет)")
+st.markdown("### ABC анализ")
 st.caption("ABC по накопительной доле выручки в текущих фильтрах. Можно переключить уровень и метрику.")
 
 abc_c1, abc_c2, abc_c3, abc_c4 = st.columns([0.30, 0.22, 0.24, 0.24])
@@ -686,11 +686,10 @@ else:
 # Overview charts
 # ----------------------------
 st.divider()
-st.markdown("### Overview")
+st.markdown("Динамика выручки")
 left, right = st.columns([1.2, 0.8])
 
 with left:
-    st.subheader("Динамика выручки")
     by_day = (
         f.assign(_dt=pd.to_datetime(f["Дата"]))
          .groupby("_dt", as_index=False)["Сумма"].sum()
@@ -712,7 +711,7 @@ st.divider()
 # ----------------------------
 # Products / Top (уровень товара)
 # ----------------------------
-st.markdown("### Products")
+st.markdown("### Обзор продукции")
 level_options = ["Номенклатура"]
 if has_cat:
     level_options.append("Категория")
@@ -761,7 +760,7 @@ st.divider()
 # ----------------------------
 # Branch comparison + trends (исправляем ось времени)
 # ----------------------------
-st.markdown("### Branches")
+st.markdown("### Обзор филиалов")
 st.subheader("Сравнение филиалов и тренды")
 
 controls = st.columns([0.34, 0.33, 0.33])
@@ -781,7 +780,7 @@ trend_branches = st.multiselect(
 b1, b2 = st.columns([0.55, 0.45])
 
 with b1:
-    st.markdown("**Рейтинг филиалов (по выручке) в текущих фильтрах**")
+    st.markdown("**Рейтинг филиалов (по выручке/кол-ву) в текущих фильтрах**")
     by_branch = (
         f.groupby("Филиал", as_index=False)
          .agg({"Сумма": "sum", "Количество": "sum"})
@@ -843,9 +842,9 @@ st.divider()
 # ----------------------------
 # Report: Branch (expand) -> Pivot by time bucket (по выбранному уровню)
 # ----------------------------
-st.markdown("### Отчет: Филиал → Уровень товара (с раскрытием)")
+st.markdown("### Обзор продаж номенклатур по филиалам")
 st.caption(
-    "Excel-стиль: итоги по филиалу + раскрытие филиала → Pivot по выбранному уровню товара. "
+    "Итоги по филиалу + раскрытие филиала → Pivot по выбранному уровню товара. "
     "Колонки — период (день/неделя/месяц/год), значения — сумма или количество."
 )
 
@@ -1010,7 +1009,7 @@ st.divider()
 # ----------------------------
 # Branch structure: 100% stacked with selectable breakdown (Точки / Категория / Подкатегория)
 # ----------------------------
-st.subheader("Структура филиалов (100% stacked)")
+st.subheader("Структура филиалов и состав их выручки")
 st.caption(
     "Каждый столбец — филиал. Внутри столбца можно переключать разрез: по точкам, категориям или подкатегориям. "
     "Полезно для сравнения структуры продаж между филиалами."
@@ -1223,7 +1222,7 @@ st.plotly_chart(fig, use_container_width=True)
 # Time & Peaks: Heatmap (stable controls + outlier handling)
 # ----------------------------
 st.markdown("### Time & Peaks")
-st.caption("Пики спроса: день недели × час. Настройки не сбрасываются; есть защита от выбросов (cap) и лог-шкала.")
+st.caption("Пики спроса: день недели × час.")
 
 if "Время" not in df.columns:
     st.info("В данных нет колонки 'Время' — heatmap по часам недоступен.")

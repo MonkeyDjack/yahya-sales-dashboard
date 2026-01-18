@@ -19,6 +19,61 @@ st.set_page_config(page_title="Sales Dashboard", layout="wide")
 # ----------------------------
 # Helpers
 # ----------------------------
+def to_xlsx_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
+    """
+    sheets: {"SheetName": df, ...}
+    Возвращает bytes для st.download_button(file_name=".xlsx")
+    """
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for name, df_ in sheets.items():
+            safe_name = (name[:31])  # Excel limit
+            df_.to_excel(writer, sheet_name=safe_name, index=False)
+    output.seek(0)
+    return output.getvalue()
+
+def abc_table(
+    df_: pd.DataFrame,
+    group_col: str,
+    value_col: str = "Сумма",
+    a_share: float = 0.80,
+    b_share: float = 0.95,
+) -> pd.DataFrame:
+    """
+    ABC-классификация по накопительной доле value_col (обычно "Сумма").
+    A: до a_share (80%), B: до b_share (95%), C: остальное.
+    Возвращает таблицу: group_col, value, share, cum_share, abc.
+    """
+    if df_.empty:
+        return pd.DataFrame(columns=[group_col, value_col, "Доля", "Накопительная доля", "ABC"])
+
+    t = (
+        df_.groupby(group_col, as_index=False)[value_col]
+           .sum()
+           .sort_values(value_col, ascending=False)
+           .reset_index(drop=True)
+    )
+
+    total = float(t[value_col].sum())
+    if total <= 0:
+        t["Доля"] = 0.0
+        t["Накопительная доля"] = 0.0
+        t["ABC"] = "C"
+        return t.rename(columns={value_col: "Значение"}).assign(**{value_col: t[value_col]})
+
+    t["Доля"] = t[value_col] / total
+    t["Накопительная доля"] = t["Доля"].cumsum()
+
+    def _abc(c):
+        if c <= a_share:
+            return "A"
+        if c <= b_share:
+            return "B"
+        return "C"
+
+    t["ABC"] = t["Накопительная доля"].apply(_abc)
+    return t
+
 
 def prune_selection(options: List[str], selected: Optional[List[str]], default_all: bool = True) -> List[str]:
     """Оставляет только те selected, которые есть в options.
@@ -500,6 +555,7 @@ if f.empty:
     st.stop()
 
 
+
 # ----------------------------
 # Header + KPI
 # ----------------------------
@@ -524,9 +580,112 @@ c3.metric("Средняя цена", money(avg_price))
 
 st.divider()
 
+st.markdown("### ABC анализ (отчет)")
+st.caption("ABC по накопительной доле выручки в текущих фильтрах. Можно переключить уровень и метрику.")
+
+abc_c1, abc_c2, abc_c3, abc_c4 = st.columns([0.30, 0.22, 0.24, 0.24])
+
+with abc_c1:
+    abc_level = st.selectbox(
+        "Уровень",
+        options=["Номенклатура", "Категория", "Подкатегория", "Филиал", "Точки"],
+        index=0,
+        key="abc_level"
+    )
+
+with abc_c2:
+    abc_metric = st.selectbox(
+        "Метрика",
+        options=["Сумма", "Количество"],
+        index=0,
+        key="abc_metric"
+    )
+
+with abc_c3:
+    a_share = st.number_input("Порог A (доля)", min_value=0.50, max_value=0.95, value=0.80, step=0.01, key="abc_a")
+
+with abc_c4:
+    b_share = st.number_input("Порог B (доля)", min_value=0.60, max_value=0.99, value=0.95, step=0.01, key="abc_b")
+
+# защита от некорректных порогов
+if b_share <= a_share:
+    st.warning("Порог B должен быть больше порога A. Исправьте значения.")
+else:
+    # проверяем наличие колонок
+    if abc_level not in f.columns:
+        st.warning(f"Колонки '{abc_level}' нет в данных — ABC по этому уровню недоступен.")
+    elif abc_metric not in f.columns:
+        st.warning(f"Колонки '{abc_metric}' нет в данных — ABC по этой метрике недоступен.")
+    else:
+        abc = abc_table(
+            df_=f,
+            group_col=abc_level,
+            value_col=abc_metric,
+            a_share=float(a_share),
+            b_share=float(b_share),
+        )
+
+        # summary по классам
+        summary = (
+            abc.groupby("ABC", as_index=False)[abc_metric]
+               .sum()
+               .sort_values("ABC")
+        )
+        total_val = float(abc[abc_metric].sum()) if not abc.empty else 0.0
+        summary["Доля"] = summary[abc_metric] / (total_val if total_val else 1.0)
+
+        s1, s2 = st.columns([0.62, 0.38])
+
+        with s1:
+            st.markdown("**Таблица ABC**")
+            if abc_metric == "Сумма":
+                fmt_value = lambda v: money(v)
+            else:
+                fmt_value = lambda v: f"{v:,.0f}".replace(",", " ")
+
+            st.dataframe(
+                abc.style.format({
+                    abc_metric: fmt_value,
+                    "Доля": "{:.2%}",
+                    "Накопительная доля": "{:.2%}",
+                }),
+                use_container_width=True,
+                height=520
+            )
+
+            xlsx_bytes = to_xlsx_bytes({
+                "ABC": abc,
+                "Summary": summary,
+            })
+
+            st.download_button(
+                "Скачать ABC (XLSX)",
+                data=xlsx_bytes,
+                file_name=f"abc_{abc_level}_{abc_metric}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+
+        with s2:
+            st.markdown("**Итоги по классам**")
+            if abc_metric == "Сумма":
+                summary_fmt = summary.style.format({abc_metric: lambda v: money(v), "Доля": "{:.1%}"})
+            else:
+                summary_fmt = summary.style.format({abc_metric: lambda v: f"{v:,.0f}".replace(",", " "), "Доля": "{:.1%}"})
+
+            st.dataframe(summary_fmt, use_container_width=True, height=220)
+
+            # график накопительной доли (Pareto)
+            st.markdown("**Парето (накопительная доля)**")
+            pareto = abc.copy()
+            pareto["_rank"] = range(1, len(pareto) + 1)
+            fig_p = px.line(pareto, x="_rank", y="Накопительная доля", markers=False)
+            fig_p.update_layout(xaxis_title="Позиция в ранге", yaxis_title="Накопительная доля")
+            st.plotly_chart(fig_p, use_container_width=True)
 # ----------------------------
 # Overview charts
 # ----------------------------
+st.divider()
 st.markdown("### Overview")
 left, right = st.columns([1.2, 0.8])
 

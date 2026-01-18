@@ -255,7 +255,6 @@ elif source_mode == "Загрузить вручную":
         df = normalize_category_columns(df)
 
 else:
-    from pathlib import Path
     p1 = Path("Итоговый_отчет1.xlsx")
     p0 = Path("Итоговый_отчет.xlsx")
     path = str(p1) if p1.exists() else str(p0)

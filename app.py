@@ -243,7 +243,6 @@ def load_excel(path: str) -> pd.DataFrame:
 
     return df
 
-@st.cache_data(show_spinner=True)
 def load_excel_from_drive(file_id: str, version: str) -> pd.DataFrame:
     """
     Скачивает XLSX из Google Drive по file_id.

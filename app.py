@@ -15,6 +15,20 @@ from googleapiclient.http import MediaIoBaseDownload
 
 st.set_page_config(page_title="Sales Dashboard", layout="wide")
 
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+@st.cache_resource
+def get_drive_service():
+    sa_info = dict(st.secrets["google"]["service_account"])
+    creds = service_account.Credentials.from_service_account_info(sa_info, scopes=DRIVE_SCOPES)
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+@st.cache_data(ttl=20, show_spinner=False)
+def get_file_meta(file_id: str) -> dict:
+    service = get_drive_service()
+    return service.files().get(
+        fileId=file_id,
+        fields="id,name,modifiedTime,size,md5Checksum"
+    ).execute()
 
 # ----------------------------
 # Helpers
@@ -229,20 +243,14 @@ def load_excel(path: str) -> pd.DataFrame:
 
     return df
 
-@st.cache_data(show_spinner=True, ttl=3600)
-def load_excel_from_drive(file_id: str) -> pd.DataFrame:
+@st.cache_data(show_spinner=True)
+def load_excel_from_drive(file_id: str, version: str) -> pd.DataFrame:
     """
-    Скачивает XLSX из Google Drive по file_id (приватный файл),
-    используя service account json из st.secrets.
+    Скачивает XLSX из Google Drive по file_id.
+    version — строка, которая меняется при обновлении файла (md5 или modifiedTime),
+    чтобы cache_data автоматически инвалидировался.
     """
-    sa_info = dict(st.secrets["google"]["service_account"])
-    file_id = st.secrets["drive"]["file_id"]
-    creds = service_account.Credentials.from_service_account_info(
-        sa_info,
-        scopes=["https://www.googleapis.com/auth/drive.readonly"]
-    )
-
-    service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    service = get_drive_service()
 
     request = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
@@ -257,7 +265,6 @@ def load_excel_from_drive(file_id: str) -> pd.DataFrame:
     df = pd.read_excel(fh, engine="openpyxl")
     df.columns = [str(c).strip() for c in df.columns]
 
-    # минимальная нормализация дат/чисел как у вас
     if "Дата" in df.columns:
         dt = pd.to_datetime(df["Дата"], errors="coerce", dayfirst=True)
         df["Дата"] = dt.dt.date
@@ -281,6 +288,8 @@ def load_excel_from_drive(file_id: str) -> pd.DataFrame:
 # ----------------------------
 st.sidebar.header("Источник данных")
 
+
+
 source_mode = st.sidebar.radio(
     "Откуда брать данные?",
     ["Google Drive (приватный файл)", "Загрузить вручную", "Локальный файл рядом с app.py"],
@@ -290,18 +299,26 @@ source_mode = st.sidebar.radio(
 df = None
 
 if source_mode == "Google Drive (приватный файл)":
-    # file_id хранится в secrets
     file_id = st.secrets["drive"]["file_id"]
-    df = load_excel_from_drive(file_id)
+
+    # 1) метаданные (версия файла)
+    meta = get_file_meta(file_id)
+    version = meta.get("md5Checksum") or meta.get("modifiedTime") or "no_version"
+
+    # (опционально) чтобы визуально контролировать, обновился ли файл
+    st.sidebar.caption(
+        f"Drive file: {meta.get('name')} | modified: {meta.get('modifiedTime')} | md5: {meta.get('md5Checksum')}"
+    )
+
+    # 2) загрузка с привязкой кеша к версии
+    df = load_excel_from_drive(file_id, version)
     df = normalize_category_columns(df)
 
-    if st.sidebar.button("Обновить данные сейчас"):
+    # 3) кнопка принудительного обновления
+    if st.sidebar.button("🔄 Обновить данные сейчас"):
         st.cache_data.clear()
         st.rerun()
-    st.sidebar.divider()
-    if st.sidebar.button("🔄 Перезагрузить данные из Google Drive"):
-        st.cache_data.clear()
-        st.rerun()
+
 
 
 elif source_mode == "Загрузить вручную":

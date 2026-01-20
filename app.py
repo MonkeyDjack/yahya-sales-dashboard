@@ -298,6 +298,11 @@ if source_mode == "Google Drive (приватный файл)":
     if st.sidebar.button("Обновить данные сейчас"):
         st.cache_data.clear()
         st.rerun()
+    st.sidebar.divider()
+    if st.sidebar.button("🔄 Перезагрузить данные из Google Drive"):
+        st.cache_data.clear()
+        st.rerun()
+
 
 elif source_mode == "Загрузить вручную":
     up = st.sidebar.file_uploader("Excel файл (.xlsx)", type=["xlsx"])

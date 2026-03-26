@@ -636,7 +636,7 @@ def calendar_heatmap_section(df_source: pd.DataFrame, metric_col: str):
     m2.metric("Дней с продажами",   str(days_sold))
     m3.metric(f"В среднем / день",  f"{avg_day:,.2f}".rstrip("0").rstrip(".") if cal_metric=="Количество" else money(avg_day))
     if not daily.empty:
-        peak_d = max(daily, key=lambda d: daily[d])
+        peak_d = daily.idxmax()
         m4.metric("Пиковый день", f"{peak_d:%d.%m.%Y}  ({daily[peak_d]:g})")
 
     st.divider()

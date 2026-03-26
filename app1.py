@@ -586,129 +586,148 @@ def build_calendar_heatmap(daily_series: pd.Series, year: int, month: int,
     return fig
 
 
+def _get_months_for_period(d_from, d_to):
+    """Список (year, month) за весь выбранный период."""
+    months = []
+    cur_d = date(d_from.year, d_from.month, 1)
+    end_d = date(d_to.year, d_to.month, 1)
+    while cur_d <= end_d:
+        months.append((cur_d.year, cur_d.month))
+        if cur_d.month == 12:
+            cur_d = date(cur_d.year + 1, 1, 1)
+        else:
+            cur_d = date(cur_d.year, cur_d.month + 1, 1)
+    return months
+
+
+def _render_one_panel(df_source, all_items, cal_metric, show_all_months,
+                      panel_idx, panel_colors):
+    """Рисует одну панель сравнения (селектор + статистика + календари)."""
+    color_accent = panel_colors[panel_idx]
+
+    # заголовок панели с цветной меткой
+    st.markdown(
+        f"<div style='background:{color_accent};border-radius:6px;"
+        f"padding:4px 12px;margin-bottom:6px;'>"
+        f"<span style='color:white;font-weight:700;font-size:13px;'>"
+        f"Позиция {panel_idx + 1}</span></div>",
+        unsafe_allow_html=True,
+    )
+
+    chosen_item = st.selectbox(
+        "Номенклатура",
+        all_items,
+        key=f"cal_item_{panel_idx}",
+        label_visibility="collapsed",
+    )
+
+    df_item = df_source[df_source["Номенклатура"].astype(str) == str(chosen_item)].copy()
+
+    if df_item.empty:
+        st.warning(f"Нет продаж")
+        return
+
+    daily = df_item.groupby(df_item["Дата"].dt.date)[cal_metric].sum()
+    daily.index = pd.to_datetime(daily.index).date
+
+    total_val = float(daily.sum())
+    days_sold = int((daily > 0).sum())
+    avg_day   = total_val / days_sold if days_sold else 0.0
+    label_val = "Продано" if cal_metric == "Количество" else "Выручка"
+
+    # ── статистика (4 карточки, подписаны к позиции) ──────────
+    st.markdown(
+        f"<div style='background:#F0F4FA;border-left:4px solid {color_accent};"
+        f"border-radius:4px;padding:8px 10px;margin:4px 0 8px 0;font-size:12px;color:#555;'>"
+        f"<b style='color:{color_accent};'>{chosen_item}</b><br>"
+        f"<span>📦 Всего ({label_val}): <b>"
+        + (f"{total_val:,.2f}".rstrip("0").rstrip(".") if cal_metric == "Количество" else money(total_val))
+        + f"</b></span>&nbsp;&nbsp;"
+        f"<span>📅 Дней с продажами: <b>{days_sold}</b></span>&nbsp;&nbsp;"
+        f"<span>⌀ В среднем/день: <b>"
+        + (f"{avg_day:,.2f}".rstrip("0").rstrip(".") if cal_metric == "Количество" else money(avg_day))
+        + "</b></span>"
+        + (
+            f"&nbsp;&nbsp;<span>🏆 Пик: <b>{daily.idxmax():%d.%m.%Y} ({daily[daily.idxmax()]:g})</b></span>"
+            if not daily.empty else ""
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── цвет карты ─────────────────────────────────────────────
+    cmaps = ["YlOrRd", "Blues", "Greens"]
+    cmap = plt.get_cmap(cmaps[panel_idx] if cal_metric == "Количество" else "Blues")
+    if cal_metric == "Сумма":
+        cmap = plt.get_cmap(["Blues", "Purples", "YlOrBr"][panel_idx])
+
+    vmax = float(daily.max()) if not daily.empty else 1.0
+
+    # ── месяцы ─────────────────────────────────────────────────
+    all_months = _get_months_for_period(d_from, d_to)
+
+    if not show_all_months:
+        month_names = ["","Январь","Февраль","Март","Апрель","Май","Июнь",
+                       "Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"]
+        sel_ym = st.selectbox(
+            "Месяц",
+            options=all_months,
+            format_func=lambda ym: f"{month_names[ym[1]]} {ym[0]}",
+            key=f"cal_month_{panel_idx}",
+        )
+        draw_months = [sel_ym]
+    else:
+        draw_months = all_months
+
+    for year, month in draw_months:
+        fig = build_calendar_heatmap(daily, year, month, cal_metric, vmax, cmap)
+        st.pyplot(fig, clear_figure=True)
+
+    st.caption(f"Цвет: 0 → {vmax:g} | {cal_metric}")
+
+
 def calendar_heatmap_section(df_source: pd.DataFrame, metric_col: str):
-    """Full UI block for Tab 6."""
+    """3-панельный блок сравнения по номенклатуре."""
     if df_source.empty:
         st.info("Нет данных по выбранным фильтрам.")
         return
 
-    # ── controls row ──────────────────────────────────────────
     all_items = sorted(df_source["Номенклатура"].dropna().astype(str).unique().tolist())
     if not all_items:
         st.info("Нет доступных позиций номенклатуры.")
         return
 
-    col_a, col_b, col_c = st.columns([3, 1, 1])
-    with col_a:
-        chosen_item = st.selectbox(
-            "Выбери номенклатуру", all_items,
-            key="cal_item_select",
-            help="Показывает суммарные продажи по выбранной позиции за каждый день периода"
-        )
-    with col_b:
+    # ── глобальные настройки над панелями ─────────────────────
+    ctrl1, ctrl2, ctrl3 = st.columns([2, 2, 2])
+    with ctrl1:
         cal_metric = st.radio(
-            "Метрика", ["Количество", "Сумма"],
+            "Метрика для всех панелей", ["Количество", "Сумма"],
             key="cal_metric_radio", horizontal=True
         )
-    with col_c:
-        show_all_months = st.checkbox("Все месяцы сразу", value=True, key="cal_all_months")
-
-    # ── filter by item ─────────────────────────────────────────
-    df_item = df_source[df_source["Номенклатура"].astype(str) == str(chosen_item)].copy()
-
-    if df_item.empty:
-        st.warning(f"Нет продаж по «{chosen_item}» в выбранном периоде.")
-        return
-
-    # daily aggregate
-    daily = (df_item.groupby(df_item["Дата"].dt.date)[cal_metric]
-             .sum())
-    daily.index = pd.to_datetime(daily.index).date   # ensure date objects
-
-    total_qty = float(daily.sum())
-    days_sold = int((daily > 0).sum())
-    avg_day   = total_qty / days_sold if days_sold else 0
-
-    # ── summary metrics ────────────────────────────────────────
-    m1, m2, m3, m4 = st.columns(4)
-    label = "Продано" if cal_metric == "Количество" else "Выручка"
-    m1.metric(f"Всего ({label})",   f"{total_qty:,.2f}".rstrip("0").rstrip(".") if cal_metric=="Количество" else money(total_qty))
-    m2.metric("Дней с продажами",   str(days_sold))
-    m3.metric(f"В среднем / день",  f"{avg_day:,.2f}".rstrip("0").rstrip(".") if cal_metric=="Количество" else money(avg_day))
-    if not daily.empty:
-        peak_d = daily.idxmax()
-        m4.metric("Пиковый день", f"{peak_d:%d.%m.%Y}  ({daily[peak_d]:g})")
+    with ctrl2:
+        show_all_months = st.checkbox(
+            "Показывать все месяцы", value=True, key="cal_all_months"
+        )
+    with ctrl3:
+        st.markdown(
+            "<div style='font-size:12px;color:#888;padding-top:8px;'>"
+            "Выбери разные позиции в каждой панели для сравнения</div>",
+            unsafe_allow_html=True
+        )
 
     st.divider()
 
-    # ── choose colormap based on metric ───────────────────────
-    cmap  = plt.get_cmap("YlOrRd")   # warm orange-red for qty
-    if cal_metric == "Сумма":
-        cmap = plt.get_cmap("Blues")
+    PANEL_COLORS = ["#C0392B", "#2471A3", "#1E8449"]   # красный / синий / зелёный
 
-    vmax = float(daily.max()) if not daily.empty else 1.0
+    panel_cols = st.columns(3, gap="medium")
+    export_data = []
 
-    # ── which months to draw ───────────────────────────────────
-    months_in_data = sorted({(d.year, d.month) for d in daily.index if daily[d] > 0})
-    # expand to cover full selected period even if no sales
-    cur_d = d_from
-    while cur_d <= d_to:
-        ym = (cur_d.year, cur_d.month)
-        if ym not in months_in_data:
-            months_in_data.append(ym)
-        # advance month
-        if cur_d.month == 12:
-            cur_d = date(cur_d.year+1, 1, 1)
-        else:
-            cur_d = date(cur_d.year, cur_d.month+1, 1)
-    months_in_data = sorted(set(months_in_data))
-
-    if not show_all_months:
-        all_ym = [(y, m) for y in range(d_from.year, d_to.year+1)
-                  for m in range(1, 13)
-                  if date(y, m, 1) >= date(d_from.year, d_from.month, 1)
-                  and date(y, m, 1) <= date(d_to.year, d_to.month, 1)]
-        sel_ym = st.selectbox(
-            "Месяц",
-            options=all_ym,
-            format_func=lambda ym: f"{['','Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'][ym[1]]} {ym[0]}",
-            key="cal_month_select",
-        )
-        months_in_data = [sel_ym]
-
-    # ── draw calendars ─────────────────────────────────────────
-    n_months = len(months_in_data)
-    cols_per_row = 3
-    rows_needed  = (n_months + cols_per_row - 1) // cols_per_row
-
-    for row_i in range(rows_needed):
-        cols_ui = st.columns(cols_per_row)
-        for col_i in range(cols_per_row):
-            idx = row_i * cols_per_row + col_i
-            if idx >= n_months:
-                break
-            year, month = months_in_data[idx]
-            fig = build_calendar_heatmap(daily, year, month, cal_metric, vmax, cmap)
-            with cols_ui[col_i]:
-                st.pyplot(fig, clear_figure=True)
-
-    # ── colorbar legend ────────────────────────────────────────
-    st.caption(f"Цвет: от 0 (бледный) → {vmax:g} (насыщенный) | {cal_metric}")
-
-    # ── export table ──────────────────────────────────────────
-    with st.expander("Таблица по дням"):
-        tbl = (daily.reset_index()
-               .rename(columns={"index":"Дата", "Дата":"Дата", 0: cal_metric})
-               .sort_values("Дата", ascending=False))
-        tbl.columns = ["Дата", cal_metric]
-        tbl["Дата"] = pd.to_datetime(tbl["Дата"])
-        st.dataframe(tbl, use_container_width=True, hide_index=True)
-        download_btn(
-            f"Скачать данные по дням — {chosen_item[:30]}",
-            [("По дням", tbl, f"{chosen_item} — {cal_metric} по дням")],
-            filename=f"calendar_{chosen_item[:20].replace(' ','_')}_{d_from:%Y%m%d}_{d_to:%Y%m%d}.xlsx",
-            key="dl_calendar",
-        )
+    for i, col in enumerate(panel_cols):
+        with col:
+            _render_one_panel(
+                df_source, all_items, cal_metric,
+                show_all_months, i, PANEL_COLORS
+            )
 
 
 # ============ UI ============

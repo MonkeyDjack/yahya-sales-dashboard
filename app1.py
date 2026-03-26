@@ -602,8 +602,10 @@ def _get_months_for_period(d_from, d_to):
 
 def _render_one_panel(df_source, all_items, cal_metric, show_all_months,
                       panel_idx, panel_colors):
-    """Рисует одну панель сравнения (селектор + статистика + календари)."""
-    color_accent = panel_colors[panel_idx]
+    """Рисует одну панель сравнения (селектор + статистика + календари).
+    panel_colors — список из 3 цветов текущей группы.
+    """
+    color_accent = panel_colors[panel_idx % 3]
 
     # заголовок панели с цветной меткой
     st.markdown(
@@ -656,10 +658,10 @@ def _render_one_panel(df_source, all_items, cal_metric, show_all_months,
     )
 
     # ── цвет карты ─────────────────────────────────────────────
-    cmaps = ["YlOrRd", "Blues", "Greens"]
-    cmap = plt.get_cmap(cmaps[panel_idx] if cal_metric == "Количество" else "Blues")
-    if cal_metric == "Сумма":
-        cmap = plt.get_cmap(["Blues", "Purples", "YlOrBr"][panel_idx])
+    cmaps_qty = ["YlOrRd", "Blues", "Greens", "Purples", "Oranges", "RdPu"]
+    cmaps_sum = ["Blues",  "Purples", "YlOrBr", "BuGn", "PuRd", "GnBu"]
+    ci = panel_idx % 6
+    cmap = plt.get_cmap(cmaps_qty[ci] if cal_metric == "Количество" else cmaps_sum[ci])
 
     vmax = float(daily.max()) if not daily.empty else 1.0
 
@@ -687,7 +689,7 @@ def _render_one_panel(df_source, all_items, cal_metric, show_all_months,
 
 
 def calendar_heatmap_section(df_source: pd.DataFrame, metric_col: str):
-    """3-панельный блок сравнения по номенклатуре."""
+    """Динамический блок сравнения: группы по 3 панели, добавляются кнопкой +."""
     if df_source.empty:
         st.info("Нет данных по выбранным фильтрам.")
         return
@@ -697,8 +699,12 @@ def calendar_heatmap_section(df_source: pd.DataFrame, metric_col: str):
         st.info("Нет доступных позиций номенклатуры.")
         return
 
-    # ── глобальные настройки над панелями ─────────────────────
-    ctrl1, ctrl2, ctrl3 = st.columns([2, 2, 2])
+    # ── инициализация счётчика групп ──────────────────────────
+    if "cal_group_count" not in st.session_state:
+        st.session_state["cal_group_count"] = 1
+
+    # ── глобальные настройки ──────────────────────────────────
+    ctrl1, ctrl2 = st.columns([2, 2])
     with ctrl1:
         cal_metric = st.radio(
             "Метрика для всех панелей", ["Количество", "Сумма"],
@@ -708,26 +714,76 @@ def calendar_heatmap_section(df_source: pd.DataFrame, metric_col: str):
         show_all_months = st.checkbox(
             "Показывать все месяцы", value=True, key="cal_all_months"
         )
-    with ctrl3:
-        st.markdown(
-            "<div style='font-size:12px;color:#888;padding-top:8px;'>"
-            "Выбери разные позиции в каждой панели для сравнения</div>",
-            unsafe_allow_html=True
-        )
 
-    st.divider()
+    # ── палитра: 3 цвета × N групп (цикл) ─────────────────────
+    BASE_COLORS = [
+        ["#C0392B", "#2471A3", "#1E8449"],   # группа 1: красный/синий/зелёный
+        ["#7D3C98", "#D35400", "#117A65"],   # группа 2: фиолетовый/оранжевый/бирюза
+        ["#1A5276", "#B7950B", "#922B21"],   # группа 3: тёмно-синий/золотой/тёмно-красный
+        ["#0E6655", "#6E2F9A", "#C0392B"],   # группа 4 и далее — снова цикл
+    ]
 
-    PANEL_COLORS = ["#C0392B", "#2471A3", "#1E8449"]   # красный / синий / зелёный
+    n_groups = st.session_state["cal_group_count"]
 
-    panel_cols = st.columns(3, gap="medium")
-    export_data = []
+    # ── рисуем все группы ─────────────────────────────────────
+    for g in range(n_groups):
+        colors = BASE_COLORS[g % len(BASE_COLORS)]
 
-    for i, col in enumerate(panel_cols):
-        with col:
-            _render_one_panel(
-                df_source, all_items, cal_metric,
-                show_all_months, i, PANEL_COLORS
+        # разделитель с номером блока
+        if g == 0:
+            st.divider()
+        else:
+            st.markdown(
+                f"<div style='display:flex;align-items:center;margin:18px 0 6px 0;'>"
+                f"<div style='flex:1;height:2px;background:linear-gradient(90deg,"
+                f"{colors[0]}44,{colors[1]}44,{colors[2]}44);border-radius:2px;'></div>"
+                f"<span style='margin:0 12px;font-size:12px;font-weight:600;"
+                f"color:#888;white-space:nowrap;'>Блок сравнения {g + 1}</span>"
+                f"<div style='flex:1;height:2px;background:linear-gradient(90deg,"
+                f"{colors[2]}44,{colors[1]}44,{colors[0]}44);border-radius:2px;'></div>"
+                f"</div>",
+                unsafe_allow_html=True,
             )
+
+        panel_cols = st.columns(3, gap="medium")
+        for i, col in enumerate(panel_cols):
+            with col:
+                # panel_idx глобально уникальный для ключей session_state
+                panel_idx = g * 3 + i
+                _render_one_panel(
+                    df_source, all_items, cal_metric,
+                    show_all_months, panel_idx, colors
+                )
+
+    # ── кнопки управления ─────────────────────────────────────
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+    btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 6])
+
+    with btn_col1:
+        if st.button(
+            "＋  Добавить блок",
+            key="cal_add_group",
+            help="Добавить ещё один ряд из 3 панелей для сравнения",
+            use_container_width=True,
+        ):
+            st.session_state["cal_group_count"] += 1
+            st.rerun()
+
+    with btn_col2:
+        if n_groups > 1:
+            if st.button(
+                "－  Убрать блок",
+                key="cal_remove_group",
+                help="Удалить последний блок",
+                use_container_width=True,
+            ):
+                st.session_state["cal_group_count"] -= 1
+                # чистим session_state ключи удалённых панелей
+                removed_base = (n_groups - 1) * 3
+                for i in range(3):
+                    for k in [f"cal_item_{removed_base+i}", f"cal_month_{removed_base+i}"]:
+                        st.session_state.pop(k, None)
+                st.rerun()
 
 
 # ============ UI ============

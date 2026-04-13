@@ -14,6 +14,17 @@ from openpyxl.styles import (
 )
 from openpyxl.utils import get_column_letter
 
+import requests
+
+FILE_ID = "1FLoz9fyHlAke0MgrEgwSd8eTekH-zbCc"
+
+@st.cache_data(ttl=3600, show_spinner="Загрузка с Google Drive...")
+def load_from_gdrive(file_id: str) -> pd.DataFrame:
+    url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    return pd.read_excel(io.BytesIO(r.content), engine="openpyxl")
+
 # ============ Page ============
 st.set_page_config(page_title="Dashboard (Base)", layout="wide")
 
@@ -176,21 +187,40 @@ def money(x: float) -> str:
 # ============ Sidebar: source ============
 st.sidebar.header("Источник данных")
 
+import requests
+
 source_mode = st.sidebar.radio(
     "Откуда брать данные?",
-    ["Загрузить вручную", "Локальный файл рядом с app.py"],
-    index=1
+    ["Google Drive", "Локальный файл", "Загрузить вручную"],
+    index=0,
 )
+
+GDRIVE_FILE_ID = "1FLoz9fyHlAke0MgrEgwSd8eTekH-zbCc"
+
+@st.cache_data(ttl=3600, show_spinner="Загрузка с Google Sheets...")
+def load_from_gdrive(file_id: str) -> pd.DataFrame:
+    url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
+    r = requests.get(url, timeout=120)
+    r.raise_for_status()
+    bio = io.BytesIO(r.content)
+    xls = pd.ExcelFile(bio)
+    preferred = ["база", "База", "Sheet1", "Лист1", "Лист 1"]
+    sheet = next((s for s in preferred if s in xls.sheet_names), xls.sheet_names[0])
+    df = pd.read_excel(bio, sheet_name=sheet, engine="openpyxl")
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
 
 df = None
 
-if source_mode == "Загрузить вручную":
-    up = st.sidebar.file_uploader("Excel файл (.xlsx)", type=["xlsx"], key="uploader_xlsx")
-    if up is not None:
-        st.session_state["uploaded_xlsx_bytes"] = up.getvalue()
-    if "uploaded_xlsx_bytes" in st.session_state:
-        df = load_excel_from_bytes(st.session_state["uploaded_xlsx_bytes"])
-else:
+if source_mode == "Google Drive":
+    try:
+        df = load_from_gdrive(GDRIVE_FILE_ID)
+        st.sidebar.caption(f"📄 Google Sheets (ID: ...{GDRIVE_FILE_ID[-6:]})")
+    except Exception as e:
+        st.error(f"Не удалось загрузить с Google Drive. Проверь доступ «по ссылке».\n\nОшибка: {e}")
+        st.stop()
+
+elif source_mode == "Локальный файл":
     p1 = Path("Итоговый_отчет1.xlsx")
     p0 = Path("Итоговый_отчет.xlsx")
     path = str(p1) if p1.exists() else str(p0)
@@ -201,10 +231,12 @@ else:
         st.error(f"Не удалось прочитать файл '{path}'. Ошибка: {e}")
         st.stop()
 
-if df is None or df.empty:
-    st.info("Загрузите Excel файл, чтобы начать.")
-    st.stop()
-
+else:  # Загрузить вручную
+    up = st.sidebar.file_uploader("Excel файл (.xlsx)", type=["xlsx"], key="uploader_xlsx")
+    if up is not None:
+        st.session_state["uploaded_xlsx_bytes"] = up.getvalue()
+    if "uploaded_xlsx_bytes" in st.session_state:
+        df = load_excel_from_bytes(st.session_state["uploaded_xlsx_bytes"])
 df = basic_clean(df)
 validate_minimum(df)
 

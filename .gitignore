@@ -9,8 +9,8 @@
 *.csv
 *.parquet
 
-# --- Исключение: файлы для GitHub Pages (dashboard_v2/docs) ---
-!dashboard_v2/docs/*.xlsx
+# --- Исключение: файлы для GitHub Pages (/docs) ---
+!docs/*.xlsx
 
 # --- Python cache / builds ---
 __pycache__/

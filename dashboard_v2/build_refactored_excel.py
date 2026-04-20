@@ -41,7 +41,8 @@ from category_mapping import (
 )
 
 SRC  = Path(__file__).parent.parent / "Итоговый_отчет1.xlsx"
-DEST = Path(__file__).parent / "docs" / "Итоговый_отчет1.xlsx"
+# /docs/ на корне репо (требование GitHub Pages)
+DEST = Path(__file__).parent.parent / "docs" / "Итоговый_отчет1.xlsx"
 
 
 def main() -> None:

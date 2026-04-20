@@ -6,16 +6,18 @@ cross-sell, сравнение периодов (MoM/YoY/WoW), рейтинг т
 ## Структура
 
 ```
-dashboard_v2/
-├── app2.py                      ← основной Streamlit-дашборд
-├── category_mapping.py          ← 8 групп + нормализация подкатегорий
-├── build_refactored_excel.py    ← разовый скрипт: обновляет docs/Итоговый_отчет1.xlsx из оригинала
-├── requirements.txt
-├── runtime.txt
-├── .gitignore
-└── docs/                        ← отдаётся через GitHub Pages
-    ├── Итоговый_отчет1.xlsx     ← рефакторенная база (с колонкой Группа)
-    └── разбивка_наборов.xlsx
+<repo root>
+├── docs/                        ← отдаётся через GitHub Pages (Settings → Pages → /docs)
+│   ├── Итоговый_отчет1.xlsx     ← плоская копия с готовой колонкой Группа
+│   └── разбивка_наборов.xlsx
+├── Итоговый_отчет1.xlsx         ← твой рабочий файл с VLOOKUP'ами (для 1С)
+└── dashboard_v2/
+    ├── app2.py                      ← основной Streamlit-дашборд
+    ├── category_mapping.py          ← 8 групп + нормализация подкатегорий
+    ├── build_refactored_excel.py    ← скрипт, генерирует docs/Итоговый_отчет1.xlsx из оригинала
+    ├── requirements.txt
+    ├── runtime.txt
+    └── .gitignore
 ```
 
 ## Что нового в v2
@@ -67,8 +69,8 @@ streamlit run app2.py
    ```bash
    python dashboard_v2/build_refactored_excel.py
    ```
-   Это нормализует подкатегории, досчитает группу и сохранит файл в `dashboard_v2/docs/`.
-5. `git add dashboard_v2/docs/Итоговый_отчет1.xlsx && git commit -m "data: refresh" && git push`.
+   Это нормализует подкатегории, досчитает группу и сохранит файл в `/docs/` (корень репо).
+5. `git add docs/Итоговый_отчет1.xlsx && git commit -m "data: refresh" && git push`.
 6. Через 1–2 минуты GitHub Pages отдаст новую версию, дашборд её подтянет.
 
 ## Категории → Группы

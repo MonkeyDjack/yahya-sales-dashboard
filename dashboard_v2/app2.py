@@ -181,8 +181,9 @@ elif source_mode == "Google Drive":
 
 elif source_mode == "Локальный файл":
     local_candidates = [
-        Path(__file__).parent / "docs" / EXCEL_NAME,
+        Path(__file__).parent.parent / "docs" / EXCEL_NAME,
         Path(__file__).parent.parent / EXCEL_NAME,
+        Path(__file__).parent / "docs" / EXCEL_NAME,
         Path(EXCEL_NAME),
     ]
     path = next((p for p in local_candidates if p.exists()), None)
@@ -752,6 +753,7 @@ def load_bom() -> pd.DataFrame:
     # 1) пробуем GitHub Pages, 2) локально
     for src_fn in [
         lambda: load_from_github_pages(GH_PAGES_BOM),
+        lambda: (Path(__file__).parent.parent / "docs" / BOM_NAME).read_bytes(),
         lambda: (Path(__file__).parent.parent / BOM_NAME).read_bytes(),
         lambda: (Path(__file__).parent / BOM_NAME).read_bytes(),
     ]:

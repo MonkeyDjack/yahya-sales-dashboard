@@ -1521,7 +1521,7 @@ with tabs[6]:
     if df_f.empty or checks_col not in df_f.columns:
         st.info("Нет данных о чеках.")
     else:
-        col1, col2 = st.columns([1, 1])
+        col1, col2, col3 = st.columns([1, 1, 1.4])
         with col1:
             min_support = st.slider(
                 "Минимум пар в чеке",
@@ -1531,6 +1531,27 @@ with tabs[6]:
         with col2:
             show_top = st.slider("Показывать пар", 10, 200, 40, 10)
 
+        # ---- Фильтр по связке точек (Магазин/Бар/Кухня) ----
+        all_tochki = sorted(df_f["Точки"].dropna().unique().tolist()) if "Точки" in df_f.columns else []
+        # формируем все возможные пары (включая одно-точечные)
+        combo_options = []
+        for i, a in enumerate(all_tochki):
+            for b in all_tochki[i:]:
+                combo_options.append(f"{a} — {b}")
+        with col3:
+            sel_combos = st.multiselect(
+                "Связка точек",
+                options=combo_options,
+                default=[],
+                placeholder="любые (по умолчанию все)",
+                help="Например, 'Магазин — Бар' = пары, где один товар из Магазина, второй — из Бара.",
+            )
+        only_cross = st.checkbox(
+            "Только межцеховые пары (Магазин↔Бар, Магазин↔Кухня, Бар↔Кухня)",
+            value=False,
+            help="Скрыть пары, где оба товара из одной точки.",
+        )
+
         with st.spinner("Считаем ассоциации..."):
             # хэшим df по набору чеков — иначе cache не сработает между фильтрами
             cs = build_crosssell(df_f[[checks_col, "Номенклатура"]].copy(), min_support=min_support)
@@ -1538,21 +1559,56 @@ with tabs[6]:
         if cs.empty:
             st.info(f"Нет пар с частотой ≥ {min_support}. Уменьши порог.")
         else:
-            disp = cs.head(show_top).copy()
-            disp["Support_A"]         = (disp["Support_A"]*100).round(2).astype(str) + "%"
-            disp["Support_B"]         = (disp["Support_B"]*100).round(2).astype(str) + "%"
-            disp["Confidence_A→B"]    = (disp["Confidence_A→B"]*100).round(1).astype(str) + "%"
-            disp["Confidence_B→A"]    = (disp["Confidence_B→A"]*100).round(1).astype(str) + "%"
-            st.dataframe(disp, use_container_width=True, hide_index=True, height=540)
+            # ---- Прикручиваем Точки к A и B + фильтр связок ----
+            sku_to_tochki = (df_f.dropna(subset=["Номенклатура","Точки"])
+                                 .drop_duplicates("Номенклатура")
+                                 .set_index("Номенклатура")["Точки"].to_dict())
+            cs["Точки_A"] = cs["A"].map(sku_to_tochki)
+            cs["Точки_B"] = cs["B"].map(sku_to_tochki)
 
-            st.caption(
-                "💡 **Как читать:** Если *Confidence A→B = 60%*, значит когда покупают A, "
-                "в 60% случаев также берут B. **Lift = 2.5** → пара встречается в 2.5× чаще, "
-                "чем ожидаемо при случайности."
-            )
-            dl_btn("Скачать пары",
-                   [("Cross-sell", cs, f"Ассоциации — min_support={min_support}")],
-                   filename=f"crosssell_{d_from:%Y%m%d}_{d_to:%Y%m%d}.xlsx", key="dl_cs")
+            def _combo_key(a, b):
+                if pd.isna(a) or pd.isna(b): return None
+                return " — ".join(sorted([a, b]))
+            cs["_combo"] = [_combo_key(a, b) for a, b in zip(cs["Точки_A"], cs["Точки_B"])]
+
+            if sel_combos:
+                cs = cs[cs["_combo"].isin(sel_combos)]
+            if only_cross:
+                cs = cs[cs["Точки_A"] != cs["Точки_B"]]
+
+            if cs.empty:
+                st.warning("По выбранным связкам пар не нашлось. Сними фильтры или уменьши min_support.")
+            else:
+                # Реорганизуем колонки: добавим Точки рядом с A и B
+                cols_order = ["A","Точки_A","B","Точки_B","Pair_count",
+                              "Support_A","Support_B","Confidence_A→B","Confidence_B→A","Lift"]
+                cols_order = [c for c in cols_order if c in cs.columns]
+                cs = cs[cols_order + [c for c in cs.columns if c not in cols_order and c != "_combo"]]
+
+                disp = cs.head(show_top).copy()
+                for c in ["Support_A","Support_B"]:
+                    if c in disp: disp[c] = (disp[c]*100).round(2).astype(str) + "%"
+                for c in ["Confidence_A→B","Confidence_B→A"]:
+                    if c in disp: disp[c] = (disp[c]*100).round(1).astype(str) + "%"
+                st.dataframe(disp, use_container_width=True, hide_index=True, height=540)
+
+                # сводка по связкам — какая чаще даёт пары
+                summary = (cs.assign(combo=cs["Точки_A"].fillna("?") + " — " + cs["Точки_B"].fillna("?"))
+                             .groupby("combo")["Pair_count"].agg(["sum","count"])
+                             .rename(columns={"sum":"Σ покупок вместе","count":"Уникальных пар"})
+                             .sort_values("Σ покупок вместе", ascending=False))
+                st.markdown("**Сводка по связкам**")
+                st.dataframe(summary, use_container_width=True, height=180)
+
+                st.caption(
+                    "💡 **Как читать:** Если *Confidence A→B = 60%*, значит когда покупают A, "
+                    "в 60% случаев также берут B. **Lift = 2.5** → пара встречается в 2.5× чаще, "
+                    "чем ожидаемо при случайности."
+                )
+                dl_btn("Скачать пары",
+                       [("Cross-sell", cs.drop(columns=["_combo"], errors="ignore"),
+                         f"Ассоциации — min_support={min_support}")],
+                       filename=f"crosssell_{d_from:%Y%m%d}_{d_to:%Y%m%d}.xlsx", key="dl_cs")
 
 
 # =============================================================================

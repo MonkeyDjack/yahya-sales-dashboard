@@ -702,13 +702,15 @@ def forecast_demand(df_in: pd.DataFrame, horizon_days: int,
     # день недели: 0..6
     dow_avg = {}
     # последние 4 полных недели
-    last28 = daily.last("28D") if len(daily) >= 28 else daily
+    cutoff_28 = idx.max() - pd.Timedelta(days=28)
+    last28 = daily[daily.index >= cutoff_28] if len(daily) >= 28 else daily
     for d in range(7):
         vals = last28[last28.index.dayofweek == d]
         dow_avg[d] = float(vals.mean()) if len(vals) else float(daily.mean())
 
     # линейный тренд по последним 30 дням
-    last30 = daily.last("30D") if len(daily) >= 30 else daily
+    cutoff_30 = idx.max() - pd.Timedelta(days=30)
+    last30 = daily[daily.index >= cutoff_30] if len(daily) >= 30 else daily
     x = np.arange(len(last30))
     y = last30.values.astype(float)
     if len(x) >= 2 and np.std(x) > 0:

@@ -1366,23 +1366,64 @@ with tabs[4]:
 # =============================================================================
 with tabs[5]:
     st.subheader("Карточка товара")
-    st.caption("Введи часть названия — поиск по подстроке (регистро-независимый).")
+    st.caption("Каскадный фильтр Группа → Категория → Подкатегория, либо просто введи часть названия.")
 
-    all_skus = sku_index(df)
-    q = st.text_input("Поиск SKU", placeholder="например: финик, плитка pistachio, капучино")
+    # ---- Каскадные фильтры по иерархии ----
+    sku_meta = (
+        df.dropna(subset=["Номенклатура"])
+          .groupby("Номенклатура", as_index=False)
+          .agg(Группа=("Группа","first"),
+               Категория=("Категория","first"),
+               Подкатегория=("Подкатегория","first"),
+               _Выручка=("Сумма","sum"),
+               _Количество=("Количество","sum"))
+    )
+
+    f_col1, f_col2, f_col3, f_col4 = st.columns([1.2, 1.2, 1.2, 1])
+    with f_col1:
+        groups_list = ["— все —"] + sorted(sku_meta["Группа"].dropna().unique().tolist())
+        sel_group = st.selectbox("Группа", groups_list, key="card_group")
+    pool = sku_meta if sel_group == "— все —" else sku_meta[sku_meta["Группа"] == sel_group]
+    with f_col2:
+        cats_list = ["— все —"] + sorted(pool["Категория"].dropna().unique().tolist())
+        sel_cat = st.selectbox("Категория", cats_list, key="card_cat")
+    if sel_cat != "— все —":
+        pool = pool[pool["Категория"] == sel_cat]
+    with f_col3:
+        subs_list = ["— все —"] + sorted(pool["Подкатегория"].dropna().unique().tolist())
+        sel_sub = st.selectbox("Подкатегория", subs_list, key="card_sub")
+    if sel_sub != "— все —":
+        pool = pool[pool["Подкатегория"] == sel_sub]
+    with f_col4:
+        sort_by = st.selectbox("Сортировка SKU", ["По выручке", "По количеству", "По алфавиту"], key="card_sort")
+
+    q = st.text_input("Поиск по названию", placeholder="например: финик, плитка pistachio, капучино",
+                      key="card_q")
     if q:
-        matches = [s for s in all_skus if q.lower() in s.lower()]
-        st.caption(f"Найдено: {len(matches)} позиций")
-    else:
-        matches = all_skus[:200]
+        pool = pool[pool["Номенклатура"].str.contains(q, case=False, na=False)]
 
-    if not matches:
-        st.info("Ничего не найдено.")
+    if sort_by == "По выручке":
+        pool = pool.sort_values("_Выручка", ascending=False)
+    elif sort_by == "По количеству":
+        pool = pool.sort_values("_Количество", ascending=False)
     else:
-        chosen = st.selectbox("Выбери позицию", matches, key="sku_card_sel")
-        df_sku = df_f[df_f["Номенклатура"] == chosen].copy()
-        # если отфильтровано по SKU до единицы — всё равно показываем на всю базу
-        df_sku_all = df[df["Номенклатура"] == chosen].copy()
+        pool = pool.sort_values("Номенклатура")
+
+    st.caption(f"Найдено: **{len(pool)}** позиций")
+    if pool.empty:
+        st.info("Ничего не найдено по этим фильтрам.")
+        st.stop()
+
+    # отображаем "Название — Выручка / Количество" в выпадашке, но возвращаем чистое имя
+    def _label(row):
+        return f"{row['Номенклатура']}  ·  {money(row['_Выручка'])} сом  ·  {num(row['_Количество'])} шт"
+    pool["_label"] = pool.apply(_label, axis=1)
+    label_to_sku = dict(zip(pool["_label"], pool["Номенклатура"]))
+    chosen_label = st.selectbox("Выбери позицию", pool["_label"].tolist(), key="sku_card_sel")
+    chosen = label_to_sku[chosen_label]
+
+    df_sku = df_f[df_f["Номенклатура"] == chosen].copy()
+    df_sku_all = df[df["Номенклатура"] == chosen].copy()
 
         if df_sku.empty:
             st.warning("За выбранный период этот SKU не продавался. Показываю данные по всему диапазону.")
@@ -1438,6 +1479,29 @@ with tabs[5]:
             st.caption(f"🎯 ABC статус: **{abc_row['ABC']}**  "
                        f"│ Доля: {abc_row['Share']*100:.2f}%  "
                        f"│ Кум. доля: {abc_row['CumShare']*100:.2f}%")
+
+        # ---- Похожие в подкатегории ----
+        sub_of_sku = df_sku["Подкатегория"].iloc[0] if "Подкатегория" in df_sku.columns and not df_sku.empty else None
+        if sub_of_sku and pd.notna(sub_of_sku):
+            siblings = (df_f[(df_f["Подкатегория"] == sub_of_sku) & (df_f["Номенклатура"] != chosen)]
+                        .groupby("Номенклатура")
+                        .agg(Выручка=("Сумма","sum"),
+                             Количество=("Количество","sum"),
+                             Чеков=(checks_col,"nunique"))
+                        .sort_values("Выручка", ascending=False).head(7).reset_index())
+            if not siblings.empty:
+                st.markdown(f"**Похожие в подкатегории «{sub_of_sku}»** (топ-7 по выручке)")
+                # сравнение со средним по подкатегории
+                sub_avg = float(siblings["Выручка"].mean())
+                cur_rev = float(df_sku["Сумма"].sum())
+                delta_vs_avg = (cur_rev - sub_avg) / sub_avg * 100 if sub_avg > 0 else 0
+                arrow = "🟢" if delta_vs_avg >= 0 else "🔴"
+                st.caption(f"{arrow} Выбранный SKU vs средний по подкатегории: "
+                           f"**{delta_vs_avg:+.1f}%** ({money(cur_rev)} vs {money(sub_avg)})")
+                siblings_show = siblings.copy()
+                siblings_show["Выручка"]    = siblings_show["Выручка"].apply(money)
+                siblings_show["Количество"] = siblings_show["Количество"].apply(num)
+                st.dataframe(siblings_show, use_container_width=True, hide_index=True, height=270)
 
         dl_btn("Скачать карточку",
                [("Динамика", daily_sku, f"Дневная динамика — {chosen[:30]}"),

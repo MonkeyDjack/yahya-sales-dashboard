@@ -57,26 +57,38 @@ st.markdown("""
   /* компактнее заголовки вкладок */
   .stTabs [data-baseweb="tab-list"] { gap: 2px; flex-wrap: wrap; }
   .stTabs [data-baseweb="tab"] { padding: 6px 12px; font-size: 14px; }
-  /* карточки KPI */
+  /* карточки KPI — принудительно тёмный текст на светлом фоне */
   div[data-testid="stMetric"] {
-      background: #FAFBFC;
+      background: #FAFBFC !important;
       border: 1px solid #E1E4E8;
       border-radius: 8px;
       padding: 10px 14px;
+      color: #1F3864 !important;
   }
+  div[data-testid="stMetric"] label,
+  div[data-testid="stMetric"] p,
+  div[data-testid="stMetric"] span,
+  div[data-testid="stMetricLabel"],
+  div[data-testid="stMetricLabel"] * { color: #4B6C97 !important; font-weight: 600; }
+  div[data-testid="stMetricValue"],
+  div[data-testid="stMetricValue"] *,
+  div[data-testid="stMetricValue"] div { color: #0B2447 !important; font-weight: 700; }
   /* инсайт-карточки */
   .insight-card {
-      background: linear-gradient(135deg, #fafbfd 0%, #f0f4fa 100%);
+      background: linear-gradient(135deg, #fafbfd 0%, #f0f4fa 100%) !important;
       border-left: 4px solid #1F4E79;
       border-radius: 6px;
       padding: 10px 14px;
       margin-bottom: 10px;
+      color: #1F3864 !important;
   }
   .insight-card.warn   { border-left-color: #E67E22; }
   .insight-card.danger { border-left-color: #C0392B; }
   .insight-card.ok     { border-left-color: #27AE60; }
-  .insight-title { font-weight: 700; font-size: 13px; color: #1F3864; margin-bottom: 4px; }
-  .insight-body  { font-size: 12px; color: #333; line-height: 1.5; }
+  .insight-card * { color: inherit !important; }
+  .insight-title { font-weight: 700; font-size: 13px; color: #1F3864 !important; margin-bottom: 4px; }
+  .insight-body  { font-size: 12px; color: #333 !important; line-height: 1.5; }
+  .insight-body b { color: #1F3864 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -88,9 +100,10 @@ GH_REPO = "yahya-sales-dashboard"
 EXCEL_NAME = "Итоговый_отчет1.xlsx"
 BOM_NAME   = "разбивка_наборов.xlsx"
 
-GH_PAGES_EXCEL = f"https://{GH_USER.lower()}.github.io/{GH_REPO}/{quote(EXCEL_NAME)}"
-GH_PAGES_BOM   = f"https://{GH_USER.lower()}.github.io/{GH_REPO}/{quote(BOM_NAME)}"
-GDRIVE_FILE_ID = "1FLoz9fyHlAke0MgrEgwSd8eTekH-zbCc"
+GH_PAGES_EXCEL   = f"https://{GH_USER.lower()}.github.io/{GH_REPO}/{quote(EXCEL_NAME)}"
+GH_PAGES_BOM     = f"https://{GH_USER.lower()}.github.io/{GH_REPO}/{quote(BOM_NAME)}"
+GH_PAGES_PARQUET = f"https://{GH_USER.lower()}.github.io/{GH_REPO}/{quote('база.parquet')}"
+GDRIVE_FILE_ID   = "1FLoz9fyHlAke0MgrEgwSd8eTekH-zbCc"
 
 
 @st.cache_data(ttl=3600, show_spinner="Загрузка с GitHub Pages...")
@@ -98,6 +111,13 @@ def load_from_github_pages(url: str) -> bytes:
     r = requests.get(url, timeout=120)
     r.raise_for_status()
     return r.content
+
+
+@st.cache_data(ttl=3600, show_spinner="Загрузка parquet с GitHub Pages...")
+def load_parquet_from_github_pages(url: str) -> pd.DataFrame:
+    r = requests.get(url, timeout=120)
+    r.raise_for_status()
+    return pd.read_parquet(io.BytesIO(r.content), engine="pyarrow")
 
 
 @st.cache_data(ttl=3600, show_spinner="Загрузка с Google Sheets...")
@@ -161,14 +181,20 @@ source_mode = st.sidebar.radio(
 
 df = None
 if source_mode == "GitHub Pages":
+    # Сначала пробуем parquet (~5 МБ, в 10-30x быстрее xlsx)
     try:
-        xlsx_bytes = load_from_github_pages(GH_PAGES_EXCEL)
-        df = read_main_sheet(xlsx_bytes)
-        st.sidebar.success(f"✓ GitHub Pages ({len(xlsx_bytes)/1024/1024:.1f} МБ)")
-    except Exception as e:
-        st.error(f"❌ Не удалось загрузить с GitHub Pages ({GH_PAGES_EXCEL}).\n\n{e}")
-        st.info("Проверь что Pages включён в Settings → Pages (Source: main, /docs).")
-        st.stop()
+        df = load_parquet_from_github_pages(GH_PAGES_PARQUET)
+        st.sidebar.success(f"✓ GitHub Pages · parquet ({len(df):,} строк)")
+    except Exception as e_pq:
+        st.sidebar.warning(f"parquet недоступен, пробую xlsx…")
+        try:
+            xlsx_bytes = load_from_github_pages(GH_PAGES_EXCEL)
+            df = read_main_sheet(xlsx_bytes)
+            st.sidebar.success(f"✓ GitHub Pages · xlsx ({len(xlsx_bytes)/1024/1024:.1f} МБ)")
+        except Exception as e:
+            st.error(f"❌ Не удалось загрузить с GitHub Pages.\n\nparquet: {e_pq}\nxlsx: {e}")
+            st.info("Проверь что Pages включён в Settings → Pages (Source: main, /docs).")
+            st.stop()
 
 elif source_mode == "Google Drive":
     try:
@@ -945,6 +971,7 @@ with tabs[0]:
             cur_sku = df_f.groupby("Номенклатура")["Сумма"].sum()
             prev_sku = df_prev.groupby("Номенклатура")["Сумма"].sum() if not df_prev.empty else pd.Series(dtype=float)
             skus = pd.DataFrame({"cur": cur_sku, "prev": prev_sku}).fillna(0)
+            skus.index.name = "Номенклатура"
             skus = skus[skus["cur"] + skus["prev"] > 0]
             skus["delta_abs"] = skus["cur"] - skus["prev"]
             skus["delta_pct"] = np.where(skus["prev"] > 0,

@@ -42,7 +42,9 @@ from category_mapping import (
 
 SRC  = Path(__file__).parent.parent / "Итоговый_отчет1.xlsx"
 # /docs/ на корне репо (требование GitHub Pages)
-DEST = Path(__file__).parent.parent / "docs" / "Итоговый_отчет1.xlsx"
+DEST         = Path(__file__).parent.parent / "docs" / "Итоговый_отчет1.xlsx"
+DEST_PARQUET = Path(__file__).parent.parent / "docs" / "база.parquet"
+DEST_REF_PQ  = Path(__file__).parent.parent / "docs" / "list1.parquet"
 
 
 def main() -> None:
@@ -145,6 +147,19 @@ def main() -> None:
 
     size_mb = DEST.stat().st_size / 1024 / 1024
     print(f"  сохранено за {time.time()-t:.1f} с, размер {size_mb:.1f} МБ")
+
+    # ------------------------------------------------------------------
+    # 6. Parquet для быстрой загрузки в Streamlit (в 10-30x быстрее xlsx)
+    # ------------------------------------------------------------------
+    print(f"\nPaquet -> {DEST_PARQUET} ...")
+    t = time.time()
+    data.to_parquet(str(DEST_PARQUET), engine="pyarrow", compression="snappy", index=False)
+    ref[["Номенклатура","Точки","Категория","Подкатегория","Группа"]].to_parquet(
+        str(DEST_REF_PQ), engine="pyarrow", compression="snappy", index=False
+    )
+    pq_mb = DEST_PARQUET.stat().st_size / 1024 / 1024
+    print(f"  сохранено за {time.time()-t:.1f} с, размер {pq_mb:.1f} МБ")
+
     print(f"\n✅ Всего: {time.time()-t0:.1f} с")
 
 

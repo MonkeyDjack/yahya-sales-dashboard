@@ -11,6 +11,7 @@
 
 # --- Исключение: файлы для GitHub Pages (/docs) ---
 !docs/*.xlsx
+!docs/*.parquet
 
 # --- Python cache / builds ---
 __pycache__/

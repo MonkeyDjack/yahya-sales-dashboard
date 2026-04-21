@@ -1425,90 +1425,90 @@ with tabs[5]:
     df_sku = df_f[df_f["Номенклатура"] == chosen].copy()
     df_sku_all = df[df["Номенклатура"] == chosen].copy()
 
-        if df_sku.empty:
-            st.warning("За выбранный период этот SKU не продавался. Показываю данные по всему диапазону.")
-            df_sku = df_sku_all
+    if df_sku.empty:
+        st.warning("За выбранный период этот SKU не продавался. Показываю данные по всему диапазону.")
+        df_sku = df_sku_all
 
-        # Карточка
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Выручка", money(float(df_sku["Сумма"].sum())))
-        c2.metric("Количество", num(float(df_sku["Количество"].sum())))
-        c3.metric("Чеков", num(count_checks(df_sku)))
-        avg_price = safe_div(float(df_sku["Сумма"].sum()), float(df_sku["Количество"].sum()))
-        c4.metric("Ср. цена", money(avg_price))
-        days_in_sku = df_sku["Дата"].dt.date.nunique()
-        c5.metric("Дней с продажами", num(days_in_sku))
+    # Карточка
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Выручка", money(float(df_sku["Сумма"].sum())))
+    c2.metric("Количество", num(float(df_sku["Количество"].sum())))
+    c3.metric("Чеков", num(count_checks(df_sku)))
+    avg_price = safe_div(float(df_sku["Сумма"].sum()), float(df_sku["Количество"].sum()))
+    c4.metric("Ср. цена", money(avg_price))
+    days_in_sku = df_sku["Дата"].dt.date.nunique()
+    c5.metric("Дней с продажами", num(days_in_sku))
 
-        # Детали
-        meta_cols = [c for c in ["Группа","Категория","Подкатегория"] if c in df_sku.columns]
-        if meta_cols:
-            meta = df_sku[meta_cols].iloc[0]
-            st.markdown(
-                "<div class='insight-card'>" +
-                " &nbsp;│&nbsp; ".join(f"<b>{k}:</b> {v}" for k, v in meta.items()) +
-                "</div>", unsafe_allow_html=True)
+    # Детали
+    meta_cols = [c for c in ["Группа","Категория","Подкатегория"] if c in df_sku.columns]
+    if meta_cols:
+        meta = df_sku[meta_cols].iloc[0]
+        st.markdown(
+            "<div class='insight-card'>" +
+            " &nbsp;│&nbsp; ".join(f"<b>{k}:</b> {v}" for k, v in meta.items()) +
+            "</div>", unsafe_allow_html=True)
 
-        st.divider()
+    st.divider()
 
-        # Тренд по дням
-        st.markdown("**Динамика продаж**")
-        colA, colB = st.columns(2)
-        daily_sku = (df_sku.groupby(df_sku["Дата"].dt.date)
-                     .agg(Выручка=("Сумма","sum"), Количество=("Количество","sum"))
-                     .reset_index().rename(columns={"Дата":"День"}))
-        daily_sku["День"] = pd.to_datetime(daily_sku["День"])
-        with colA:
-            st.markdown("*По выручке*")
-            st.bar_chart(daily_sku.set_index("День")["Выручка"])
-        with colB:
-            st.markdown("*По количеству*")
-            st.bar_chart(daily_sku.set_index("День")["Количество"])
+    # Тренд по дням
+    st.markdown("**Динамика продаж**")
+    colA, colB = st.columns(2)
+    daily_sku = (df_sku.groupby(df_sku["Дата"].dt.date)
+                 .agg(Выручка=("Сумма","sum"), Количество=("Количество","sum"))
+                 .reset_index().rename(columns={"Дата":"День"}))
+    daily_sku["День"] = pd.to_datetime(daily_sku["День"])
+    with colA:
+        st.markdown("*По выручке*")
+        st.bar_chart(daily_sku.set_index("День")["Выручка"])
+    with colB:
+        st.markdown("*По количеству*")
+        st.bar_chart(daily_sku.set_index("День")["Количество"])
 
-        # По филиалам / точкам
-        st.markdown("**Где продаётся**")
-        by_br = df_sku.groupby(["Филиал","Точки"]).agg(
-            Выручка=("Сумма","sum"), Количество=("Количество","sum"),
-            Чеков=(checks_col, "nunique")).reset_index().sort_values("Выручка", ascending=False)
-        by_br["Выручка"]    = by_br["Выручка"].apply(money)
-        by_br["Количество"] = by_br["Количество"].apply(lambda v: num(v))
-        st.dataframe(by_br, use_container_width=True, hide_index=True, height=300)
+    # По филиалам / точкам
+    st.markdown("**Где продаётся**")
+    by_br = df_sku.groupby(["Филиал","Точки"]).agg(
+        Выручка=("Сумма","sum"), Количество=("Количество","sum"),
+        Чеков=(checks_col, "nunique")).reset_index().sort_values("Выручка", ascending=False)
+    by_br["Выручка"]    = by_br["Выручка"].apply(money)
+    by_br["Количество"] = by_br["Количество"].apply(lambda v: num(v))
+    st.dataframe(by_br, use_container_width=True, hide_index=True, height=300)
 
-        # ABC статус
-        if chosen in abc_overall["Номенклатура"].values:
-            abc_row = abc_overall[abc_overall["Номенклатура"] == chosen].iloc[0]
-            st.caption(f"🎯 ABC статус: **{abc_row['ABC']}**  "
-                       f"│ Доля: {abc_row['Share']*100:.2f}%  "
-                       f"│ Кум. доля: {abc_row['CumShare']*100:.2f}%")
+    # ABC статус
+    if chosen in abc_overall["Номенклатура"].values:
+        abc_row = abc_overall[abc_overall["Номенклатура"] == chosen].iloc[0]
+        st.caption(f"🎯 ABC статус: **{abc_row['ABC']}**  "
+                   f"│ Доля: {abc_row['Share']*100:.2f}%  "
+                   f"│ Кум. доля: {abc_row['CumShare']*100:.2f}%")
 
-        # ---- Похожие в подкатегории ----
-        sub_of_sku = df_sku["Подкатегория"].iloc[0] if "Подкатегория" in df_sku.columns and not df_sku.empty else None
-        if sub_of_sku and pd.notna(sub_of_sku):
-            siblings = (df_f[(df_f["Подкатегория"] == sub_of_sku) & (df_f["Номенклатура"] != chosen)]
-                        .groupby("Номенклатура")
-                        .agg(Выручка=("Сумма","sum"),
-                             Количество=("Количество","sum"),
-                             Чеков=(checks_col,"nunique"))
-                        .sort_values("Выручка", ascending=False).head(7).reset_index())
-            if not siblings.empty:
-                st.markdown(f"**Похожие в подкатегории «{sub_of_sku}»** (топ-7 по выручке)")
-                # сравнение со средним по подкатегории
-                sub_avg = float(siblings["Выручка"].mean())
-                cur_rev = float(df_sku["Сумма"].sum())
-                delta_vs_avg = (cur_rev - sub_avg) / sub_avg * 100 if sub_avg > 0 else 0
-                arrow = "🟢" if delta_vs_avg >= 0 else "🔴"
-                st.caption(f"{arrow} Выбранный SKU vs средний по подкатегории: "
-                           f"**{delta_vs_avg:+.1f}%** ({money(cur_rev)} vs {money(sub_avg)})")
-                siblings_show = siblings.copy()
-                siblings_show["Выручка"]    = siblings_show["Выручка"].apply(money)
-                siblings_show["Количество"] = siblings_show["Количество"].apply(num)
-                st.dataframe(siblings_show, use_container_width=True, hide_index=True, height=270)
+    # ---- Похожие в подкатегории ----
+    sub_of_sku = df_sku["Подкатегория"].iloc[0] if "Подкатегория" in df_sku.columns and not df_sku.empty else None
+    if sub_of_sku and pd.notna(sub_of_sku):
+        siblings = (df_f[(df_f["Подкатегория"] == sub_of_sku) & (df_f["Номенклатура"] != chosen)]
+                    .groupby("Номенклатура")
+                    .agg(Выручка=("Сумма","sum"),
+                         Количество=("Количество","sum"),
+                         Чеков=(checks_col,"nunique"))
+                    .sort_values("Выручка", ascending=False).head(7).reset_index())
+        if not siblings.empty:
+            st.markdown(f"**Похожие в подкатегории «{sub_of_sku}»** (топ-7 по выручке)")
+            # сравнение со средним по подкатегории
+            sub_avg = float(siblings["Выручка"].mean())
+            cur_rev = float(df_sku["Сумма"].sum())
+            delta_vs_avg = (cur_rev - sub_avg) / sub_avg * 100 if sub_avg > 0 else 0
+            arrow = "🟢" if delta_vs_avg >= 0 else "🔴"
+            st.caption(f"{arrow} Выбранный SKU vs средний по подкатегории: "
+                       f"**{delta_vs_avg:+.1f}%** ({money(cur_rev)} vs {money(sub_avg)})")
+            siblings_show = siblings.copy()
+            siblings_show["Выручка"]    = siblings_show["Выручка"].apply(money)
+            siblings_show["Количество"] = siblings_show["Количество"].apply(num)
+            st.dataframe(siblings_show, use_container_width=True, hide_index=True, height=270)
 
-        dl_btn("Скачать карточку",
-               [("Динамика", daily_sku, f"Дневная динамика — {chosen[:30]}"),
-                ("По точкам", df_sku.groupby(["Филиал","Точки"]).agg(
-                    Выручка=("Сумма","sum"), Количество=("Количество","sum")).reset_index(),
-                 f"По точкам — {chosen[:30]}")],
-               filename=f"sku_{chosen[:20].replace(' ','_')}.xlsx", key="dl_sku")
+    dl_btn("Скачать карточку",
+           [("Динамика", daily_sku, f"Дневная динамика — {chosen[:30]}"),
+            ("По точкам", df_sku.groupby(["Филиал","Точки"]).agg(
+                Выручка=("Сумма","sum"), Количество=("Количество","sum")).reset_index(),
+             f"По точкам — {chosen[:30]}")],
+           filename=f"sku_{chosen[:20].replace(' ','_')}.xlsx", key="dl_sku")
 
 
 # =============================================================================

@@ -26,7 +26,7 @@ import io
 import requests
 import calendar
 from pathlib import Path
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from urllib.parse import quote
 from itertools import combinations
 from collections import Counter
@@ -442,6 +442,28 @@ def _autowidth(ws):
             ml = max(ml, len(v))
         ws.column_dimensions[letter].width = min(max(ml + 3, 8), 55)
 
+def _to_excel_safe(v):
+    if v is None or v is pd.NA or v is pd.NaT:
+        return None
+    if isinstance(v, pd.Timestamp):
+        return None if pd.isna(v) else v.to_pydatetime()
+    if isinstance(v, (datetime, date)):
+        return v
+    if isinstance(v, (str, int, float, bool)):
+        return None if isinstance(v, float) and pd.isna(v) else v
+    if hasattr(v, "item"):
+        try:
+            return v.item()
+        except (ValueError, AttributeError):
+            pass
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return str(v)
+
+
 def df_to_sheet(ws, df_in: pd.DataFrame, title: str | None = None):
     start = 1
     if title:
@@ -463,12 +485,14 @@ def df_to_sheet(ws, df_in: pd.DataFrame, title: str | None = None):
         is_alt = ri % 2 == 0
         for ci, (col, v) in enumerate(zip(df_in.columns, row), 1):
             c = ws.cell(row=start + ri, column=ci)
-            if isinstance(v, pd.Timestamp):
-                c.value = v.to_pydatetime(); c.number_format = 'DD.MM.YYYY'
-            elif hasattr(v, "item"):
-                c.value = v.item()
+            safe = _to_excel_safe(v)
+            if isinstance(safe, datetime):
+                c.value = safe; c.number_format = 'DD.MM.YYYY'
             else:
-                c.value = v
+                try:
+                    c.value = safe
+                except ValueError:
+                    c.value = str(safe) if safe is not None else None
             fm = _fmt(col)
             if fm: c.number_format = fm
             c.font = Font(size=10); c.border = bd

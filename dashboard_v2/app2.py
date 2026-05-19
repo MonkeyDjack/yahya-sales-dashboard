@@ -103,6 +103,7 @@ BOM_NAME   = "разбивка_наборов.xlsx"
 GH_PAGES_EXCEL   = f"https://{GH_USER.lower()}.github.io/{GH_REPO}/{quote(EXCEL_NAME)}"
 GH_PAGES_BOM     = f"https://{GH_USER.lower()}.github.io/{GH_REPO}/{quote(BOM_NAME)}"
 GH_PAGES_PARQUET = f"https://{GH_USER.lower()}.github.io/{GH_REPO}/{quote('база.parquet')}"
+GH_PAGES_COST    = f"https://{GH_USER.lower()}.github.io/{GH_REPO}/{quote('себестоимость.parquet')}"
 GDRIVE_FILE_ID   = "1FLoz9fyHlAke0MgrEgwSd8eTekH-zbCc"
 
 
@@ -118,6 +119,21 @@ def load_parquet_from_github_pages(url: str) -> pd.DataFrame:
     r = requests.get(url, timeout=120)
     r.raise_for_status()
     return pd.read_parquet(io.BytesIO(r.content), engine="pyarrow")
+
+
+@st.cache_data(ttl=3600, show_spinner="Загрузка справочника себестоимости...")
+def load_cost_reference() -> pd.DataFrame:
+    """Загружает docs/себестоимость.parquet (с GitHub Pages, fallback на локальный)."""
+    try:
+        r = requests.get(GH_PAGES_COST, timeout=60)
+        r.raise_for_status()
+        return pd.read_parquet(io.BytesIO(r.content), engine="pyarrow")
+    except Exception:
+        local = Path(__file__).resolve().parents[1] / "docs" / "себестоимость.parquet"
+        if local.exists():
+            return pd.read_parquet(local)
+        return pd.DataFrame(columns=["Номенклатура", "Себес сырья", "ПНР",
+                                       "Себес полн.", "Розница", "Сегмент"])
 
 
 @st.cache_data(ttl=3600, show_spinner="Загрузка с Google Sheets...")
@@ -396,6 +412,18 @@ if ap["groups"]:        df_f = df_f[df_f["Группа"].isin(ap["groups"])]
 if ap["categories"]:    df_f = df_f[df_f["Категория"].isin(ap["categories"])]
 if ap["subcategories"]: df_f = df_f[df_f["Подкатегория"].isin(ap["subcategories"])]
 if ap["items"]:         df_f = df_f[df_f["Номенклатура"].isin(ap["items"])]
+
+# Та же выборка, что и df_f, но БЕЗ глобального date-фильтра.
+# Нужна для вкладок, у которых свой выбор периодов (ABC-вкладка).
+df_universe = df[df["Филиал"].isin(ap["branches"])].copy()
+if ap["points"]:        df_universe = df_universe[df_universe["Точки"].isin(ap["points"])]
+if ap["groups"]:        df_universe = df_universe[df_universe["Группа"].isin(ap["groups"])]
+if ap["categories"]:    df_universe = df_universe[df_universe["Категория"].isin(ap["categories"])]
+if ap["subcategories"]: df_universe = df_universe[df_universe["Подкатегория"].isin(ap["subcategories"])]
+if ap["items"]:         df_universe = df_universe[df_universe["Номенклатура"].isin(ap["items"])]
+
+# Справочник себестоимости (для метрики «Маржа» в ABC-вкладке)
+cost_ref = load_cost_reference()
 
 metric      = ap["abc_metric"]
 metric_col  = "Сумма" if metric == "Сумма" else "Количество"
@@ -1199,73 +1227,346 @@ with tabs[1]:
 
 
 # =============================================================================
-# TAB 3 — 🔝 ABC / Pareto
+# TAB 3 — 🔝 ABC / Pareto (новая версия: один период / сравнение двух)
 # =============================================================================
 with tabs[2]:
-    st.subheader(f"ABC по номенклатуре — метрика: {metric_col}")
+    st.subheader("🔝 ABC / Pareto — анализ ассортимента")
+    st.caption("Свой выбор периода. Можно сравнивать два окна — длинный авто-обрезается до короткого.")
 
-    mode = st.radio("Срез", ["Общий","По филиалам"], horizontal=True, key="abc_mode")
+    # ---------- хелперы локальные ----------
+    def _agg_period(df_p: pd.DataFrame, level_col: str) -> pd.DataFrame:
+        """Агрегат по уровню с обогащением себестоимостью на SKU-уровне."""
+        if df_p.empty:
+            return pd.DataFrame(columns=[level_col, "Сумма", "Количество", "Маржа"])
+        sku = (df_p.groupby("Номенклатура", dropna=False)
+                    .agg(Сумма=("Сумма", "sum"), Количество=("Количество", "sum"))
+                    .reset_index())
+        if cost_ref is not None and not cost_ref.empty:
+            sku = sku.merge(cost_ref[["Номенклатура", "Себес полн."]],
+                             on="Номенклатура", how="left")
+            sku["Ср. цена"] = np.where(sku["Количество"] > 0,
+                                         sku["Сумма"] / sku["Количество"], np.nan)
+            sku["Маржа"] = (sku["Ср. цена"] - sku["Себес полн."]) * sku["Количество"]
+            sku["Маржа"] = sku["Маржа"].fillna(0)
+        else:
+            sku["Себес полн."] = np.nan
+            sku["Ср. цена"]   = np.nan
+            sku["Маржа"]      = np.nan
+        if level_col == "Номенклатура":
+            sku["% маржи"] = np.where(sku["Сумма"] > 0, sku["Маржа"] / sku["Сумма"], np.nan)
+            return sku
+        meta = df_p[["Номенклатура", level_col]].drop_duplicates("Номенклатура")
+        sku = sku.merge(meta, on="Номенклатура", how="left")
+        agg = (sku.groupby(level_col, dropna=False)
+                  .agg(Сумма=("Сумма", "sum"),
+                        Количество=("Количество", "sum"),
+                        Маржа=("Маржа", "sum"))
+                  .reset_index())
+        agg["% маржи"] = np.where(agg["Сумма"] > 0, agg["Маржа"] / agg["Сумма"], np.nan)
+        return agg
 
-    if mode == "Общий":
-        c1, c2 = st.columns([1, 2])
+    def _compute_abc(df_agg: pd.DataFrame, value_col: str) -> pd.DataFrame:
+        if df_agg.empty:
+            return df_agg
+        x = df_agg.sort_values(value_col, ascending=False).reset_index(drop=True)
+        tot = float(x[value_col].sum())
+        if tot > 0:
+            x["Доля"] = x[value_col] / tot
+            x["Кум. доля"] = x["Доля"].cumsum()
+            x["ABC"] = x["Кум. доля"].apply(
+                lambda v: "A" if v <= A_THR else ("B" if v <= B_THR else "C"))
+        else:
+            x["Доля"] = 0.0; x["Кум. доля"] = 0.0; x["ABC"] = "—"
+        return x
+
+    def _period_picker(label: str, default: tuple, key_prefix: str) -> tuple:
+        c1, c2 = st.columns(2)
         with c1:
-            st.markdown("**Сводка A/B/C**")
-            st.dataframe(abc_stats, use_container_width=True, hide_index=True)
-            top_n = st.slider("Top-N для Pareto", 10, 200, 30, 10, key="abc_topn")
+            f = st.date_input(f"{label} — с", value=default[0], key=f"{key_prefix}_from")
         with c2:
-            if abc_overall.empty:
-                st.info("Нет данных.")
-            else:
-                d = abc_overall.head(top_n).copy()
+            t = st.date_input(f"{label} — по", value=default[1], key=f"{key_prefix}_to")
+        return pd.Timestamp(f), pd.Timestamp(t)
+
+    def _auto_clip(p1f, p1t, p2f, p2t):
+        """Обрезаем длинный период с конца, чтобы длины совпали."""
+        l1 = (p1t - p1f).days; l2 = (p2t - p2f).days
+        if l1 == l2:
+            return p1f, p1t, p2f, p2t, False, ""
+        if l1 > l2:
+            return p1f, p1f + pd.Timedelta(days=l2), p2f, p2t, True, \
+                   f"Период 1 обрезан до {l2+1} дн., чтобы совпасть с Периодом 2"
+        return p1f, p1t, p2f, p2f + pd.Timedelta(days=l1), True, \
+               f"Период 2 обрезан до {l1+1} дн., чтобы совпасть с Периодом 1"
+
+    # ---------- контролы ----------
+    abc_mode = st.radio("Режим", ["Один период", "Сравнение двух периодов"],
+                         horizontal=True, key="abc_mode_v2")
+
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        abc_level = st.selectbox("Уровень",
+                                  ["Номенклатура", "Подкатегория", "Категория", "Группа"],
+                                  index=0, key="abc_level_v2")
+    with cc2:
+        metric_opts = ["Выручка (сом)", "Количество (шт)"]
+        if cost_ref is not None and not cost_ref.empty:
+            metric_opts.append("Маржа (сом)")
+        abc_metric_sel = st.selectbox("Метрика", metric_opts, index=0, key="abc_metric_v2")
+    value_col = {"Выручка (сом)": "Сумма",
+                  "Количество (шт)": "Количество",
+                  "Маржа (сом)": "Маржа"}[abc_metric_sel]
+
+    if cost_ref is None or cost_ref.empty:
+        st.info("⚠️ Справочник себестоимости не загружен — метрика «Маржа» и колонки маржи недоступны.")
+
+    # =========================================================================
+    # РЕЖИМ A: один период
+    # =========================================================================
+    if abc_mode == "Один период":
+        p_from, p_to = _period_picker("Период", (d_from, d_to), "abc_single")
+        df_p = df_universe[(df_universe["Дата"] >= p_from) & (df_universe["Дата"] <= p_to)]
+        st.caption(f"📅 {p_from:%d.%m.%Y} – {p_to:%d.%m.%Y}  ·  "
+                    f"{len(df_p):,} строк  ·  "
+                    f"{df_p['Номенклатура'].nunique() if not df_p.empty else 0} {abc_level.lower()}")
+
+        if df_p.empty:
+            st.info("Нет данных за выбранный период.")
+        else:
+            res = _compute_abc(_agg_period(df_p, abc_level), value_col)
+            # сводка A/B/C
+            stats = (res.groupby("ABC", observed=True)
+                        .agg(SKU=(abc_level, "count"), Value=(value_col, "sum")).reset_index())
+            tot_val = stats["Value"].sum() or 1.0
+            tot_sku = stats["SKU"].sum() or 1
+            stats["%выр"] = stats["Value"] / tot_val
+            stats["%SKU"] = stats["SKU"] / tot_sku
+            stats["ABC"] = pd.Categorical(stats["ABC"], categories=["A", "B", "C", "—"], ordered=True)
+            stats = stats.sort_values("ABC")
+
+            c_l, c_r = st.columns([1, 2])
+            with c_l:
+                st.markdown("**A/B/C сводка**")
+                st.dataframe(stats, use_container_width=True, hide_index=True)
+                top_n = st.slider("Top-N для Pareto", 10, 200, 30, 10, key="abc_topn_v2")
+            with c_r:
+                d_chart = res.head(top_n)
                 fig, ax1 = plt.subplots(figsize=(13, 5))
-                bars = ax1.bar(range(len(d)), d["Value"], color="#1F4E79", alpha=0.85)
-                ax1.set_ylabel(metric_col); ax1.set_xlabel("")
-                ax1.set_xticks(range(len(d)))
-                ax1.set_xticklabels(d["Номенклатура"].astype(str).tolist(),
-                                    rotation=75, ha="right", fontsize=8)
+                ax1.bar(range(len(d_chart)), d_chart[value_col], color="#1F4E79", alpha=0.85)
+                ax1.set_ylabel(abc_metric_sel)
+                ax1.set_xticks(range(len(d_chart)))
+                ax1.set_xticklabels(d_chart[abc_level].astype(str).tolist(),
+                                     rotation=75, ha="right", fontsize=8)
                 ax2 = ax1.twinx()
-                ax2.plot(range(len(d)), d["CumShare"].values, color="#C0392B", marker="o", linewidth=1.5)
+                ax2.plot(range(len(d_chart)), d_chart["Кум. доля"].values,
+                          color="#C0392B", marker="o", linewidth=1.5)
                 ax2.set_ylabel("Кум. доля"); ax2.set_ylim(0, 1.05)
                 ax2.axhline(A_THR, linestyle="--", color="#27AE60", alpha=0.7, label="A: 80%")
                 ax2.axhline(B_THR, linestyle="--", color="#E67E22", alpha=0.7, label="B: 95%")
                 ax2.legend(loc="center right")
-                ax1.set_title(f"Pareto Top {top_n}")
+                ax1.set_title(f"Pareto Top {top_n}  ·  {p_from:%d.%m.%Y}–{p_to:%d.%m.%Y}")
                 fig.tight_layout()
                 st.pyplot(fig, clear_figure=True)
-        st.markdown("**Таблица ABC**")
-        st.dataframe(abc_overall.head(500), use_container_width=True)
-        dl_btn("Скачать ABC (общий)",
-               [("ABC Общий", abc_overall, f"ABC — {metric_col}"),
-                ("ABC Сводка", abc_stats, "Сводка A/B/C")],
-               filename=f"abc_{d_from:%Y%m%d}_{d_to:%Y%m%d}.xlsx", key="dl_abc_o")
+
+            st.markdown("**Таблица**")
+            show_cols = [abc_level, "Сумма", "Количество", "Доля", "Кум. доля", "ABC"]
+            if "Маржа" in res.columns:
+                show_cols += ["Маржа", "% маржи"]
+            if abc_level == "Номенклатура" and "Себес полн." in res.columns:
+                show_cols.insert(-2, "Себес полн.")
+            st.dataframe(res[show_cols].head(500), use_container_width=True, hide_index=True)
+
+            dl_btn(f"Скачать ABC ({abc_level})",
+                   [("ABC", res[show_cols], f"ABC {abc_level} — {abc_metric_sel}"),
+                    ("Сводка A/B/C", stats, "Сводка")],
+                   filename=f"abc_{abc_level.lower()}_{p_from:%Y%m%d}_{p_to:%Y%m%d}.xlsx",
+                   key="dl_abc_v2_single")
+
+    # =========================================================================
+    # РЕЖИМ B: сравнение двух периодов
+    # =========================================================================
     else:
-        branches_in = sorted(abc_by_branch["Филиал"].dropna().astype(str).unique().tolist())
-        if branches_in:
-            sel_b = st.selectbox("Филиал", branches_in, key="abc_branch")
-            one = abc_by_branch[abc_by_branch["Филиал"].astype(str) == sel_b].copy()
-            one = one.sort_values("Value", ascending=False).reset_index(drop=True)
-            tot = float(one["Value"].sum()) or 0.0
-            if tot > 0:
-                one["Share"] = one["Value"]/tot; one["CumShare"] = one["Share"].cumsum()
-                one["ABC"] = one["CumShare"].apply(lambda x: "A" if x<=A_THR else ("B" if x<=B_THR else "C"))
-            top_n_b = st.slider("Top-N", 10, 200, 30, 10, key="abc_topnb")
-            d = one.head(top_n_b)
-            if not d.empty:
-                fig, ax1 = plt.subplots(figsize=(13, 5))
-                ax1.bar(range(len(d)), d["Value"], color="#1F4E79", alpha=0.85)
-                ax1.set_xticks(range(len(d)))
-                ax1.set_xticklabels(d["Номенклатура"].astype(str).tolist(),
-                                    rotation=75, ha="right", fontsize=8)
-                ax2 = ax1.twinx()
-                ax2.plot(range(len(d)), d["CumShare"].values, color="#C0392B", marker="o")
-                ax2.set_ylim(0, 1.05); ax2.axhline(A_THR, linestyle="--", color="#27AE60")
-                ax2.axhline(B_THR, linestyle="--", color="#E67E22")
-                fig.tight_layout()
-                st.pyplot(fig, clear_figure=True)
-            st.dataframe(one.head(500), use_container_width=True)
-            dl_btn(f"Скачать ABC — {sel_b}",
-                   [(f"ABC {sel_b[:20]}", one, f"ABC — {sel_b}")],
-                   filename=f"abc_{sel_b}_{d_from:%Y%m%d}.xlsx", key="dl_abc_b")
+        max_d = pd.Timestamp(df_universe["Дата"].max()).normalize() \
+                  if not df_universe.empty else pd.Timestamp("today").normalize()
+
+        st.markdown("**Пресеты:**")
+        bc1, bc2, bc3, bc4 = st.columns(4)
+
+        def _set_dates(p1f, p1t, p2f, p2t):
+            st.session_state["abc_cmp_p1_from"] = p1f.date()
+            st.session_state["abc_cmp_p1_to"]   = p1t.date()
+            st.session_state["abc_cmp_p2_from"] = p2f.date()
+            st.session_state["abc_cmp_p2_to"]   = p2t.date()
+
+        if bc1.button("YTD vs прошлый год", use_container_width=True, key="abc_p_ytd"):
+            p2f = pd.Timestamp(year=max_d.year, month=1, day=1)
+            p2t = max_d
+            p1f = pd.Timestamp(year=max_d.year - 1, month=1, day=1)
+            p1t = pd.Timestamp(year=max_d.year - 1, month=max_d.month, day=max_d.day)
+            _set_dates(p1f, p1t, p2f, p2t); st.rerun()
+        if bc2.button("Последние 30 vs пред. 30", use_container_width=True, key="abc_p_30"):
+            p2t = max_d; p2f = max_d - pd.Timedelta(days=29)
+            p1t = p2f - pd.Timedelta(days=1); p1f = p1t - pd.Timedelta(days=29)
+            _set_dates(p1f, p1t, p2f, p2t); st.rerun()
+        if bc3.button("Месяц vs прошлый год", use_container_width=True, key="abc_p_mom"):
+            p2f = pd.Timestamp(year=max_d.year, month=max_d.month, day=1)
+            p2t = max_d
+            p1f = pd.Timestamp(year=max_d.year - 1, month=max_d.month, day=1)
+            p1t = pd.Timestamp(year=max_d.year - 1, month=max_d.month, day=max_d.day)
+            _set_dates(p1f, p1t, p2f, p2t); st.rerun()
+        if bc4.button("Квартал vs прошлый год", use_container_width=True, key="abc_p_qoq"):
+            qm = ((max_d.month - 1) // 3) * 3 + 1
+            p2f = pd.Timestamp(year=max_d.year, month=qm, day=1)
+            p2t = max_d
+            p1f = pd.Timestamp(year=max_d.year - 1, month=qm, day=1)
+            p1t = pd.Timestamp(year=max_d.year - 1, month=max_d.month, day=max_d.day)
+            _set_dates(p1f, p1t, p2f, p2t); st.rerun()
+
+        d_p2t = max_d
+        d_p2f = max_d - pd.Timedelta(days=29)
+        d_p1t = d_p2f - pd.Timedelta(days=1)
+        d_p1f = d_p1t - pd.Timedelta(days=29)
+
+        st.markdown("**Период 1 (база сравнения):**")
+        p1f, p1t = _period_picker("Период 1", (d_p1f, d_p1t), "abc_cmp_p1")
+        st.markdown("**Период 2 (анализируемый):**")
+        p2f, p2t = _period_picker("Период 2", (d_p2f, d_p2t), "abc_cmp_p2")
+
+        p1f, p1t, p2f, p2t, clipped, clip_msg = _auto_clip(p1f, p1t, p2f, p2t)
+        if clipped:
+            st.warning(f"⚠️ {clip_msg}")
+        st.caption(f"📅 П1: {p1f:%d.%m.%Y}–{p1t:%d.%m.%Y}  ·  П2: {p2f:%d.%m.%Y}–{p2t:%d.%m.%Y}")
+
+        df_p1 = df_universe[(df_universe["Дата"] >= p1f) & (df_universe["Дата"] <= p1t)]
+        df_p2 = df_universe[(df_universe["Дата"] >= p2f) & (df_universe["Дата"] <= p2t)]
+
+        if df_p1.empty and df_p2.empty:
+            st.info("Нет данных ни в одном из периодов.")
+        else:
+            r1 = _compute_abc(_agg_period(df_p1, abc_level), value_col)
+            r2 = _compute_abc(_agg_period(df_p2, abc_level), value_col)
+            r1 = r1[[abc_level, value_col, "ABC"]].rename(
+                columns={value_col: f"{value_col}_1", "ABC": "ABC_1"})
+            r2_keep = [abc_level, value_col, "ABC"]
+            if "% маржи" in r2.columns: r2_keep.append("% маржи")
+            if "Маржа" in r2.columns and value_col != "Маржа":
+                r2_keep.append("Маржа")
+            r2 = r2[r2_keep].rename(columns={value_col: f"{value_col}_2", "ABC": "ABC_2"})
+
+            m = r1.merge(r2, on=abc_level, how="outer")
+            m[f"{value_col}_1"] = m[f"{value_col}_1"].fillna(0)
+            m[f"{value_col}_2"] = m[f"{value_col}_2"].fillna(0)
+            m["Δ"] = m[f"{value_col}_2"] - m[f"{value_col}_1"]
+            m["Δ_%"] = np.where(m[f"{value_col}_1"] > 0,
+                                  m["Δ"] / m[f"{value_col}_1"], np.nan)
+
+            v1, v2 = m[f"{value_col}_1"].sum(), m[f"{value_col}_2"].sum()
+            d_abs = v2 - v1
+            d_pct = d_abs / v1 if v1 else 0
+            mk1, mk2, mk3 = st.columns(3)
+            fmt = (lambda x: money(x)) if value_col != "Количество" else (lambda x: num(x))
+            mk1.metric(f"{abc_metric_sel} · П1", fmt(v1))
+            mk2.metric(f"{abc_metric_sel} · П2", fmt(v2), delta=f"{d_pct*100:+.1f}%")
+            n_new  = int((m[f"{value_col}_1"] == 0).sum())
+            n_lost = int((m[f"{value_col}_2"] == 0).sum())
+            mk3.metric("Новинки / Снятые", f"+{n_new} / −{n_lost}")
+
+            sub_tabs = st.tabs(["📊 Pareto-Drift", "🔄 ABC-матрица", "📈 Growers",
+                                 "📉 Decliners", "🆕 Новинки/Снятые", "🚨 Кандидаты"])
+
+            with sub_tabs[0]:
+                st.markdown("**Pareto Периода 2 + смещение класса ABC**")
+                drift = m.sort_values(f"{value_col}_2", ascending=False).copy()
+                drift["ABC_1"] = drift["ABC_1"].fillna("—")
+                drift["ABC_2"] = drift["ABC_2"].fillna("—")
+                drift["Drift"] = drift["ABC_1"].astype(str) + " → " + drift["ABC_2"].astype(str)
+                cols = [abc_level, f"{value_col}_1", f"{value_col}_2", "Δ", "Δ_%",
+                         "ABC_1", "ABC_2", "Drift"]
+                st.dataframe(drift[cols].head(100), use_container_width=True, hide_index=True)
+
+            with sub_tabs[1]:
+                st.markdown("**Матрица переходов ABC (Период 1 → Период 2)**")
+                mm = m.copy()
+                mm["ABC_1"] = mm["ABC_1"].fillna("новинки")
+                mm["ABC_2"] = mm["ABC_2"].fillna("сняты")
+                pivot_n = pd.crosstab(mm["ABC_1"], mm["ABC_2"])
+                pivot_v = (mm.groupby(["ABC_1", "ABC_2"])[f"{value_col}_2"]
+                              .sum().unstack(fill_value=0))
+                a, b = st.columns(2)
+                with a:
+                    st.markdown("По SKU (число позиций)")
+                    st.dataframe(pivot_n, use_container_width=True)
+                with b:
+                    st.markdown(f"По {abc_metric_sel} в Периоде 2")
+                    st.dataframe(pivot_v.round(0).astype("Int64", errors="ignore"),
+                                  use_container_width=True)
+
+            with sub_tabs[2]:
+                st.markdown("**Топ-20 драйверов роста**")
+                grow = m[m["Δ"] > 0].sort_values("Δ", ascending=False).head(20)
+                show = [abc_level, f"{value_col}_1", f"{value_col}_2", "Δ", "Δ_%", "ABC_2"]
+                st.dataframe(grow[show], use_container_width=True, hide_index=True)
+
+            with sub_tabs[3]:
+                st.markdown("**Топ-20 деклайнеров**")
+                decl = m[m["Δ"] < 0].sort_values("Δ").head(20)
+                show = [abc_level, f"{value_col}_1", f"{value_col}_2", "Δ", "Δ_%", "ABC_1", "ABC_2"]
+                st.dataframe(decl[show], use_container_width=True, hide_index=True)
+
+            with sub_tabs[4]:
+                cl, cr = st.columns(2)
+                new_items  = m[m[f"{value_col}_1"] == 0].sort_values(f"{value_col}_2", ascending=False)
+                lost_items = m[m[f"{value_col}_2"] == 0].sort_values(f"{value_col}_1", ascending=False)
+                with cl:
+                    st.markdown(f"**🆕 Новинки** ({len(new_items)})")
+                    st.dataframe(new_items[[abc_level, f"{value_col}_2", "ABC_2"]].head(50),
+                                  use_container_width=True, hide_index=True)
+                with cr:
+                    st.markdown(f"**❌ Снятые** ({len(lost_items)})")
+                    st.dataframe(lost_items[[abc_level, f"{value_col}_1", "ABC_1"]].head(50),
+                                  use_container_width=True, hide_index=True)
+
+            with sub_tabs[5]:
+                st.markdown("**🚨 Кандидаты на вывод** (≥ 2 сигналов риска)")
+                cands = m.copy()
+                flags_list = []
+                sig_list = []
+                for _, r in cands.iterrows():
+                    flags = []
+                    if r.get("ABC_2") == "C":
+                        flags.append("ABC=C")
+                    pm = r.get("% маржи")
+                    if pd.notna(pm) and pm < 0.30:
+                        flags.append("%маржи<30")
+                    dp = r.get("Δ_%")
+                    if pd.notna(dp) and dp < -0.30 and r[f"{value_col}_1"] > 0:
+                        flags.append("Δ<−30%")
+                    if r[f"{value_col}_2"] == 0 and r[f"{value_col}_1"] > 0:
+                        flags.append("снято")
+                    sig_list.append(len(flags))
+                    flags_list.append(", ".join(flags))
+                cands["Сигналов"] = sig_list
+                cands["Флаги"] = flags_list
+                cands = (cands[cands["Сигналов"] >= 2]
+                           .sort_values(["Сигналов", f"{value_col}_1"], ascending=[False, False]))
+                show = [abc_level, "Сигналов", "Флаги", "ABC_1", "ABC_2",
+                        f"{value_col}_1", f"{value_col}_2", "Δ", "Δ_%"]
+                if "% маржи" in cands.columns: show.append("% маржи")
+                if cands.empty:
+                    st.success("✅ Кандидатов на вывод нет.")
+                else:
+                    st.dataframe(cands[show].head(100), use_container_width=True, hide_index=True)
+
+            dl_btn("Скачать сравнение",
+                   [("Сравнение", m, f"ABC {abc_level} · П1 vs П2"),
+                    ("Growers", m[m["Δ"] > 0].sort_values("Δ", ascending=False), "Драйверы роста"),
+                    ("Decliners", m[m["Δ"] < 0].sort_values("Δ"), "Падающие"),
+                    ("Новинки", m[m[f"{value_col}_1"] == 0].sort_values(f"{value_col}_2", ascending=False),
+                       "Новые в Периоде 2"),
+                    ("Снятые", m[m[f"{value_col}_2"] == 0].sort_values(f"{value_col}_1", ascending=False),
+                       "Исчезли в Периоде 2")],
+                   filename=(f"abc_cmp_{p1f:%Y%m%d}-{p1t:%Y%m%d}_"
+                              f"vs_{p2f:%Y%m%d}-{p2t:%Y%m%d}.xlsx"),
+                   key="dl_abc_v2_cmp")
 
 
 # =============================================================================

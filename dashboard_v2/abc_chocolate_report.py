@@ -15,10 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
-from openpyxl.formatting.rule import CellIsRule
+import xlsxwriter
 
 ROOT = Path(__file__).resolve().parents[1]
 SALES_PATH = ROOT / "docs" / "база.parquet"
@@ -312,17 +309,7 @@ def build_candidates(s25_same: pd.DataFrame,
     return cand[cols]
 
 
-# ---------- запись Excel ----------
-
-HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
-HEADER_FONT = Font(bold=True, color="FFFFFF", size=10)
-ABC_FILL = {
-    "A": PatternFill("solid", fgColor="C6EFCE"),
-    "B": PatternFill("solid", fgColor="FFEB9C"),
-    "C": PatternFill("solid", fgColor="FFC7CE"),
-}
-THIN = Side(style="thin", color="BFBFBF")
-BORDER = Border(bottom=THIN)
+# ---------- запись Excel (через xlsxwriter — пишет apply*=1, читается всеми Excel) ----------
 
 MONEY_COLS = {"Выручка", "Маржа сумма", "Маржа за шт", "Себес сырье", "ПНР",
               "Себес полн.", "Ср. цена", "Прайс розница",
@@ -333,57 +320,116 @@ INT_COLS = {"Количество", "Кол_25", "Кол_26", "Δ кол.", "М�
 PCT_COLS = {"Доля выручки", "Кум. доля", "% маржи", "Δ выр. %", "Падение выр. %"}
 
 
-def write_sheet(ws, df: pd.DataFrame, abc_col: str | None = None) -> None:
+def _coerce(v):
+    if v is None or v is pd.NA or v is pd.NaT:
+        return None
+    if isinstance(v, float) and pd.isna(v):
+        return None
+    if isinstance(v, pd.Timestamp):
+        return None if pd.isna(v) else v.to_pydatetime()
+    if hasattr(v, "item"):
+        try:
+            return v.item()
+        except (ValueError, AttributeError):
+            pass
+    return v
+
+
+def _fmt_for(col: str) -> str | None:
+    if col in MONEY_COLS or col in INT_COLS:
+        return "#,##0"
+    if col in PCT_COLS:
+        return "0.0%"
+    return None
+
+
+def _make_formats(wb):
+    """Создаёт словарь готовых форматов xlsxwriter.
+
+    xlsxwriter автоматически пишет apply_fill=1, apply_font=1 и т.д. в xf —
+    поэтому заливки гарантированно отображаются во всех Excel.
+    """
+    base = {"font_name": "Calibri", "font_size": 10, "bottom": 1, "bottom_color": "#BFBFBF"}
+
+    f = {}
+    f["header"] = wb.add_format({
+        "bold": True, "font_color": "white", "bg_color": "#1F4E79",
+        "align": "center", "valign": "vcenter", "text_wrap": True,
+        "font_name": "Calibri", "font_size": 10, "border": 1, "border_color": "#1F4E79",
+    })
+
+    def mk(num_fmt=None, bg=None):
+        spec = dict(base)
+        if num_fmt:
+            spec["num_format"] = num_fmt
+        if bg:
+            spec["bg_color"] = bg
+        return wb.add_format(spec)
+
+    # обычные ячейки: формат × фон (None/нечёт, светлый/чёт, A, B, C)
+    bgs = {"none": None, "alt": "#F2F6FC", "A": "#C6EFCE", "B": "#FFEB9C", "C": "#FFC7CE"}
+    fmts = {"text": None, "money": "#,##0", "pct": "0.0%"}
+    for bg_name, bg in bgs.items():
+        for f_name, num_fmt in fmts.items():
+            f[f"{f_name}_{bg_name}"] = mk(num_fmt, bg)
+    return f
+
+
+def write_sheet(wb, sheet_name: str, df: pd.DataFrame, abc_col: str | None = None) -> None:
+    ws = wb.add_worksheet(sheet_name[:31])
+    fmts = _make_formats(wb)
+
     if df.empty:
-        ws["A1"] = "Нет данных"
+        ws.write(0, 0, "Нет данных")
         return
+
     headers = list(df.columns)
-    for i, h in enumerate(headers, 1):
-        c = ws.cell(row=1, column=i, value=str(h))
-        c.fill = HEADER_FILL
-        c.font = HEADER_FONT
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws.row_dimensions[1].height = 30
+    for ci, h in enumerate(headers):
+        ws.write(0, ci, str(h), fmts["header"])
+    ws.set_row(0, 30)
 
-    abc_idx = headers.index(abc_col) + 1 if abc_col and abc_col in headers else None
+    abc_idx = headers.index(abc_col) if abc_col and abc_col in headers else None
 
-    for ri, row in enumerate(df.itertuples(index=False), 2):
-        for ci, (col, v) in enumerate(zip(headers, row), 1):
-            cell = ws.cell(row=ri, column=ci)
-            if v is None or (isinstance(v, float) and pd.isna(v)) or v is pd.NA:
-                cell.value = None
-            elif hasattr(v, "item"):
-                try:
-                    cell.value = v.item()
-                except (ValueError, AttributeError):
-                    cell.value = str(v)
-            else:
-                cell.value = v
-            if col in MONEY_COLS:
-                cell.number_format = '#,##0'
-            elif col in INT_COLS:
-                cell.number_format = '#,##0'
+    # для autowidth
+    widths = [len(str(h)) for h in headers]
+
+    for ri, row in enumerate(df.itertuples(index=False), 1):
+        is_alt = ri % 2 == 0
+        bg = "alt" if is_alt else "none"
+        for ci, (col, v) in enumerate(zip(headers, row)):
+            v_safe = _coerce(v)
+
+            # выбор формата
+            kind = "text"
+            if col in MONEY_COLS or col in INT_COLS:
+                kind = "money"
             elif col in PCT_COLS:
-                cell.number_format = '0.0%'
-            cell.font = Font(size=10)
-            cell.border = BORDER
-        if abc_idx is not None:
-            v = ws.cell(row=ri, column=abc_idx).value
-            if v in ABC_FILL:
-                ws.cell(row=ri, column=abc_idx).fill = ABC_FILL[v]
+                kind = "pct"
+            row_bg = bg
+            if abc_idx is not None and ci == abc_idx and v_safe in ("A", "B", "C"):
+                row_bg = v_safe
+            fmt = fmts[f"{kind}_{row_bg}"]
 
-    # autowidth
-    for col in ws.columns:
-        ml = 0
-        letter = get_column_letter(col[0].column)
-        for c in col:
-            txt = "" if c.value is None else str(c.value)
-            if len(txt) > ml:
-                ml = len(txt)
-        ws.column_dimensions[letter].width = min(max(ml + 2, 8), 48)
+            if v_safe is None:
+                ws.write_blank(ri, ci, None, fmt)
+            elif isinstance(v_safe, (int, float)):
+                ws.write_number(ri, ci, v_safe, fmt)
+            else:
+                ws.write_string(ri, ci, str(v_safe), fmt)
 
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
+            # autowidth: учёт длины
+            txt_len = len(str(v_safe)) if v_safe is not None else 0
+            if txt_len > widths[ci]:
+                widths[ci] = txt_len
+
+    # ширины колонок
+    for ci, w in enumerate(widths):
+        ws.set_column(ci, ci, min(max(w + 2, 8), 48))
+
+    ws.freeze_panes(1, 0)
+    last_row = len(df)
+    last_col = len(headers) - 1
+    ws.autofilter(0, 0, last_row, last_col)
 
 
 # ---------- main ----------
@@ -431,36 +477,42 @@ def main() -> None:
     cand = build_candidates(s25_same, s26, cost_df)
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    wb = Workbook()
-    wb.remove(wb.active)
+    wb = xlsxwriter.Workbook(str(OUT_PATH))
 
-    # Summary sheet
-    ws = wb.create_sheet("Summary")
-    ws["A1"] = "ABC-анализ шоколадной продукции — 2025 vs 2026"
-    ws["A1"].font = Font(bold=True, size=14, color="1F4E79")
-    ws["A3"] = f"SKU в продажах:  {len(all_skus)}"
-    ws["A4"] = f"Совпало с прайсом себеса:  {matched} (см. колонку «Совпало с прайсом»)"
-    ws["A5"] = f"2025: месяцев {s25['Мес'].nunique()}, выручка {int(s25['Сумма'].sum()):,} сом"
-    ws["A6"] = (f"2026: до {last_day_26:02d}.{last_month_26:02d}.2026 "
-                f"({s26['Мес'].nunique()} мес., последний — неполный), "
-                f"выручка {int(s26['Сумма'].sum()):,} сом")
-    ws["A7"] = (f"Сопоставимый период 2025: 01.{full_months_26[0]:02d}.2025 – "
-                f"{last_day_26:02d}.{last_month_26:02d}.2025  "
-                f"(для листов «ABC 2025 сопост.», «Сравнение 25 vs 26», «Кандидаты»).")
-    ws["A9"] = "Логика ABC по выручке внутри периода: A ≤ 80%, B ≤ 95%, C ≤ 100% кумулятивной доли."
-    ws["A10"] = "Маржа = Ср.цена − Себес полн.  (где есть совпадение по прайсу)."
-    ws["A11"] = "Кандидаты на вывод: ≥ 2 сигналов (ABC=C, маржа≤0, %маржи<30, падение выручки >30%)."
-    ws.column_dimensions["A"].width = 100
+    # --- Summary sheet ---
+    ws = wb.add_worksheet("Summary")
+    title_fmt = wb.add_format({"bold": True, "font_size": 14, "font_color": "#1F4E79",
+                                "font_name": "Calibri"})
+    body_fmt = wb.add_format({"font_size": 11, "font_name": "Calibri"})
+    ws.set_column(0, 0, 100)
+    ws.write(0, 0, "ABC-анализ шоколадной продукции — 2025 vs 2026", title_fmt)
+    ws.write(2, 0, f"SKU в продажах:  {len(all_skus)}", body_fmt)
+    ws.write(3, 0, f"Совпало с прайсом себеса:  {matched} (см. колонку «Совпало с прайсом»)", body_fmt)
+    ws.write(4, 0, f"2025: месяцев {s25['Мес'].nunique()}, "
+                     f"выручка {int(s25['Сумма'].sum()):,} сом".replace(",", " "), body_fmt)
+    ws.write(5, 0, (f"2026: до {last_day_26:02d}.{last_month_26:02d}.2026 "
+                     f"({s26['Мес'].nunique()} мес., последний — неполный), "
+                     f"выручка {int(s26['Сумма'].sum()):,} сом").replace(",", " "), body_fmt)
+    ws.write(6, 0, (f"Сопоставимый период 2025: 01.{full_months_26[0]:02d}.2025 – "
+                     f"{last_day_26:02d}.{last_month_26:02d}.2025  "
+                     f"(для листов «ABC 2025 сопост.», «Сравнение 25 vs 26», «Кандидаты»)."),
+              body_fmt)
+    ws.write(8, 0, "Логика ABC по выручке внутри периода: A ≤ 80%, B ≤ 95%, C ≤ 100% кумулятивной доли.",
+              body_fmt)
+    ws.write(9, 0, "Маржа = Ср.цена − Себес полн.  (где есть совпадение по прайсу).", body_fmt)
+    ws.write(10, 0,
+              "Кандидаты на вывод: ≥ 2 сигналов (ABC=C, маржа≤0, %маржи<30, падение выручки >30%).",
+              body_fmt)
 
-    write_sheet(wb.create_sheet("ABC 2025 (год)"), sum_25, abc_col="ABC")
-    write_sheet(wb.create_sheet("ABC 2025 сопост."), sum_25_same, abc_col="ABC")
-    write_sheet(wb.create_sheet("ABC 2026 (YTD)"), sum_26, abc_col="ABC")
-    write_sheet(wb.create_sheet("ABC 2025 по месяцам"), monthly_25, abc_col="ABC")
-    write_sheet(wb.create_sheet("ABC 2026 по месяцам"), monthly_26, abc_col="ABC")
-    write_sheet(wb.create_sheet("Сравнение 25 vs 26"), compare, abc_col="ABC_26")
-    write_sheet(wb.create_sheet("Кандидаты на вывод"), cand, abc_col="ABC 26")
+    write_sheet(wb, "ABC 2025 (год)", sum_25, abc_col="ABC")
+    write_sheet(wb, "ABC 2025 сопост.", sum_25_same, abc_col="ABC")
+    write_sheet(wb, "ABC 2026 (YTD)", sum_26, abc_col="ABC")
+    write_sheet(wb, "ABC 2025 по месяцам", monthly_25, abc_col="ABC")
+    write_sheet(wb, "ABC 2026 по месяцам", monthly_26, abc_col="ABC")
+    write_sheet(wb, "Сравнение 25 vs 26", compare, abc_col="ABC_26")
+    write_sheet(wb, "Кандидаты на вывод", cand, abc_col="ABC 26")
 
-    wb.save(OUT_PATH)
+    wb.close()
     print(f"\nГотово: {OUT_PATH}")
     print(f"Файл: {OUT_PATH.stat().st_size/1024:.1f} КБ")
 

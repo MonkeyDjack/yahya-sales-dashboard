@@ -34,7 +34,12 @@ BACKUP = ROOT / "docs" / "база.parquet.bak_before_category_fix"
 # Ручные переопределения для SKU, у которых канон неверный
 MANUAL_OVERRIDES: dict[str, tuple[str, str]] = {
     "Нац.коллекция - соленая карамель и талкан на 15к": ("Наборы", "Нац. конфеты"),
+    # Драже Клубника в БШ — относится к классическому драже (как остальные)
+    "Драже Клубника в БШ 100г": ("Драже", "Драже классика"),
 }
+
+# Подкатегория = Категория, если канон уйдёт в «Без подкатегории» (читаемее в отчётах)
+SUBCATEGORY_FALLBACK_FROM_CATEGORY = True
 
 
 def main() -> None:
@@ -62,6 +67,15 @@ def main() -> None:
             old = tuple(canon.loc[sku])
             canon.loc[sku] = [cat, sub]
             print(f"  override: {sku!r} {old} → ({cat!r}, {sub!r})")
+
+    # «Без подкатегории» → Категория (по запросу: подкатегория должна быть осмысленной)
+    if SUBCATEGORY_FALLBACK_FROM_CATEGORY:
+        mask_empty_sub = canon["Подкатегория"].fillna("").str.strip().isin(
+            ["", "Без подкатегории"]
+        )
+        n_fix = mask_empty_sub.sum()
+        canon.loc[mask_empty_sub, "Подкатегория"] = canon.loc[mask_empty_sub, "Категория"]
+        print(f"  fallback Подкатегория ← Категория: {n_fix} SKU")
 
     # --- 2. Перезапись строк ---
     df_new = df.copy()

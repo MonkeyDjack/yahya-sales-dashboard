@@ -547,6 +547,46 @@ def dl_btn(label, sheets, filename="report.xlsx", key=None):
     )
 
 
+# --- Простой Excel: без заливок/цветов, только жирный хедер + числовые форматы ---
+def plain_df_to_sheet(ws, df_in: pd.DataFrame):
+    bold = Font(bold=True)
+    for i, col in enumerate(df_in.columns, 1):
+        ws.cell(row=1, column=i, value=str(col)).font = bold
+    for ri, row in enumerate(df_in.itertuples(index=False), 1):
+        for ci, (col, v) in enumerate(zip(df_in.columns, row), 1):
+            c = ws.cell(row=1 + ri, column=ci)
+            safe = _to_excel_safe(v)
+            if isinstance(safe, datetime):
+                c.value = safe; c.number_format = 'DD.MM.YYYY'
+            else:
+                try:
+                    c.value = safe
+                except ValueError:
+                    c.value = str(safe) if safe is not None else None
+            fm = _fmt(col)
+            if fm: c.number_format = fm
+    _autowidth(ws)
+    ws.freeze_panes = ws.cell(row=2, column=1)
+
+def plain_xlsx_bytes(sheets: list[tuple[str, pd.DataFrame]]) -> bytes:
+    wb = openpyxl.Workbook(); wb.remove(wb.active)
+    for name, dfx in sheets:
+        if dfx is None or dfx.empty: continue
+        safe = name[:31].replace("/", "-").replace("\\", "-")
+        plain_df_to_sheet(wb.create_sheet(title=safe), dfx.reset_index(drop=True))
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0); return buf.getvalue()
+
+def dl_btn_plain(label, sheets, filename="report.xlsx", key=None):
+    clean = [(n, d) for n, d in sheets if d is not None and not d.empty]
+    if not clean:
+        st.info("Нет данных для выгрузки за выбранный период."); return
+    st.download_button(
+        f"⬇️ {label}", data=plain_xlsx_bytes(clean), file_name=filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=key,
+    )
+
+
 # =============================================================================
 # Базовые агрегаты (KPI, ABC, время)
 # =============================================================================
@@ -976,6 +1016,7 @@ TAB_NAMES = [
     "🗓 Сезонность",
     "🏭 Склад + наборы",
     "📋 План / Факт",
+    "📊 Динамика / выгрузка",
 ]
 tabs = st.tabs(TAB_NAMES)
 
@@ -1280,11 +1321,22 @@ with tabs[2]:
         return x
 
     def _period_picker(label: str, default: tuple, key_prefix: str) -> tuple:
+        """Дата-пикер, ПОЛНОСТЬЮ независимый от глобального date-фильтра.
+
+        Один раз кладём default в session_state, дальше виджет читает ТОЛЬКО
+        через key= (без value=), чтобы Streamlit не перезаписывал значение
+        дефолтом при смене глобальных фильтров.
+        """
+        kf, kt = f"{key_prefix}_from", f"{key_prefix}_to"
+        if kf not in st.session_state:
+            st.session_state[kf] = pd.Timestamp(default[0]).date()
+        if kt not in st.session_state:
+            st.session_state[kt] = pd.Timestamp(default[1]).date()
         c1, c2 = st.columns(2)
         with c1:
-            f = st.date_input(f"{label} — с", value=default[0], key=f"{key_prefix}_from")
+            f = st.date_input(f"{label} — с", key=kf)
         with c2:
-            t = st.date_input(f"{label} — по", value=default[1], key=f"{key_prefix}_to")
+            t = st.date_input(f"{label} — по", key=kt)
         return pd.Timestamp(f), pd.Timestamp(t)
 
     def _auto_clip(p1f, p1t, p2f, p2t):
@@ -1323,6 +1375,13 @@ with tabs[2]:
     # РЕЖИМ A: один период
     # =========================================================================
     if abc_mode == "Один период":
+        st.caption("📌 Период независим от глобального date-фильтра (фильтры филиалов/категорий применяются).")
+        cb1, cb2 = st.columns([4, 1])
+        with cb2:
+            if st.button("🔄 Сбросить", key="abc_single_reset", help="Сбросить период к глобальному"):
+                st.session_state["abc_single_from"] = pd.Timestamp(d_from).date()
+                st.session_state["abc_single_to"]   = pd.Timestamp(d_to).date()
+                st.rerun()
         p_from, p_to = _period_picker("Период", (d_from, d_to), "abc_single")
         df_p = df_universe[(df_universe["Дата"] >= p_from) & (df_universe["Дата"] <= p_to)]
         st.caption(f"📅 {p_from:%d.%m.%Y} – {p_to:%d.%m.%Y}  ·  "
@@ -1388,6 +1447,7 @@ with tabs[2]:
         max_d = pd.Timestamp(df_universe["Дата"].max()).normalize() \
                   if not df_universe.empty else pd.Timestamp("today").normalize()
 
+        st.caption("📌 Периоды независимы от глобального date-фильтра.")
         st.markdown("**Пресеты:**")
         bc1, bc2, bc3, bc4 = st.columns(4)
 
@@ -2358,6 +2418,127 @@ with tabs[11]:
                            "Сводная"))
             dl_btn("Скачать план/факт", sheets,
                    filename=f"plan_fact_{d_from:%Y%m%d}.xlsx", key="dl_pl")
+
+
+# =============================================================================
+# TAB 13 — 📊 Динамика / выгрузка
+# =============================================================================
+with tabs[12]:
+    st.subheader("📊 Динамика за период + выгрузка в Excel")
+    st.caption("Свой выбор периода (независим от глобального date-фильтра). "
+               "Глобальные фильтры филиалов/категорий применяются. "
+               "Excel — без кастомного оформления.")
+
+    # ---------- контролы ----------
+    cc1, cc2, cc3 = st.columns([2, 1, 1])
+    with cc1:
+        df_kf, df_kt = "dyn_from", "dyn_to"
+        if df_kf not in st.session_state:
+            st.session_state[df_kf] = pd.Timestamp(d_from).date()
+        if df_kt not in st.session_state:
+            st.session_state[df_kt] = pd.Timestamp(d_to).date()
+        dc1, dc2 = st.columns(2)
+        with dc1: dyn_from = pd.Timestamp(st.date_input("Период — с", key=df_kf))
+        with dc2: dyn_to   = pd.Timestamp(st.date_input("Период — по", key=df_kt))
+        if dyn_from > dyn_to:
+            dyn_from, dyn_to = dyn_to, dyn_from
+    with cc2:
+        gran = st.selectbox("Разбивка", ["Неделя", "Месяц", "Год"], index=1, key="dyn_gran")
+    with cc3:
+        dim = st.selectbox("Измерение", ["Нет (вся сеть)", "Филиал", "Группа", "Категория"],
+                           index=0, key="dyn_dim")
+    dim_col = None if dim.startswith("Нет") else dim
+
+    if st.button("🔄 Сбросить период", key="dyn_reset"):
+        st.session_state[df_kf] = pd.Timestamp(d_from).date()
+        st.session_state[df_kt] = pd.Timestamp(d_to).date()
+        st.rerun()
+
+    df_dyn = df_universe[(df_universe["Дата"] >= dyn_from) &
+                         (df_universe["Дата"] <= dyn_to)].copy()
+
+    st.caption(f"📅 {dyn_from:%d.%m.%Y} – {dyn_to:%d.%m.%Y}  ·  {len(df_dyn):,} строк")
+
+    if df_dyn.empty:
+        st.info("Нет данных по выбранным фильтрам и периоду.")
+    else:
+        per_freq  = {"Неделя": "W", "Месяц": "M", "Год": "Y"}[gran]
+        df_dyn["_period"] = df_dyn["Дата"].dt.to_period(per_freq).dt.start_time
+        df_dyn["_check"] = (df_dyn[checks_col].astype(str).str.strip()
+                            .str.replace(r"\s+", " ", regex=True)
+                            .replace({"": pd.NA, "nan": pd.NA}))
+
+        gcols = ["_period"] + ([dim_col] if dim_col else [])
+        agg = (df_dyn.groupby(gcols, dropna=False)
+               .agg(Выручка=("Сумма", "sum"), Количество=("Количество", "sum"))
+               .reset_index())
+        chk = (df_dyn.dropna(subset=["_check"])
+               .groupby(gcols)["_check"].nunique().reset_index(name="Чеков"))
+        agg = agg.merge(chk, on=gcols, how="left")
+        agg["Чеков"] = agg["Чеков"].fillna(0).astype(int)
+        agg["Средний чек"] = np.where(agg["Чеков"] > 0, agg["Выручка"] / agg["Чеков"], 0.0)
+
+        agg = agg.sort_values(gcols).reset_index(drop=True)
+        if dim_col:
+            agg["Δ % (выручка)"] = (agg.groupby(dim_col)["Выручка"].pct_change() * 100).round(1)
+        else:
+            agg["Δ % (выручка)"] = (agg["Выручка"].pct_change() * 100).round(1)
+
+        def _per_label(ts):
+            ts = pd.Timestamp(ts)
+            if gran == "Год":  return f"{ts.year}"
+            if gran == "Месяц": return f"{ts.year}-{ts.month:02d}"
+            return ts.strftime("%d.%m.%Y")  # начало недели (пн)
+        agg.insert(0, "Период", agg["_period"].map(_per_label))
+
+        # ---------- график ----------
+        fig, ax = plt.subplots(figsize=(13, 4.5))
+        if dim_col:
+            totals = (agg.groupby(dim_col)["Выручка"].sum()
+                      .sort_values(ascending=False))
+            top = list(totals.head(8).index)
+            for name in top:
+                s = agg[agg[dim_col] == name]
+                ax.plot(s["_period"], s["Выручка"], marker="o", markersize=3,
+                        linewidth=1.6, label=str(name))
+            ax.legend(loc="upper left", framealpha=0.95, fontsize=8, ncol=2)
+            if len(totals) > 8:
+                st.caption(f"На графике топ-8 из {len(totals)} «{dim_col}» по выручке "
+                           f"(в таблице и Excel — все).")
+        else:
+            s = agg.sort_values("_period")
+            ax.plot(s["_period"], s["Выручка"], marker="o", markersize=4,
+                    linewidth=2, color="#1F4E79", label="Выручка")
+            ax.legend(loc="upper left", framealpha=0.95)
+        ax.set_ylabel("Выручка, сом"); ax.grid(alpha=0.3)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter(
+            "%Y" if gran == "Год" else ("%m.%Y" if gran == "Месяц" else "%d.%m")))
+        fig.autofmt_xdate()
+        st.pyplot(fig, clear_figure=True)
+
+        # ---------- таблица (форматированная) ----------
+        out_cols = (["Период"] + ([dim_col] if dim_col else [])
+                    + ["Выручка", "Количество", "Чеков", "Средний чек", "Δ % (выручка)"])
+        disp = agg[out_cols].copy()
+        disp["Выручка"] = disp["Выручка"].apply(money)
+        disp["Количество"] = disp["Количество"].apply(lambda v: num(v))
+        disp["Чеков"] = disp["Чеков"].apply(lambda v: num(v))
+        disp["Средний чек"] = disp["Средний чек"].apply(money)
+        disp["Δ % (выручка)"] = disp["Δ % (выручка)"].apply(
+            lambda v: f"{v:+.1f}%" if pd.notna(v) else "—")
+        st.dataframe(disp, use_container_width=True, hide_index=True)
+
+        # ---------- Excel ----------
+        xls_main = agg[out_cols].copy()
+        xls_main["Период"] = agg["_period"]  # дата для Excel
+        sheets = [("Динамика", xls_main)]
+        if dim_col:
+            pivot = (agg.pivot_table(index="_period", columns=dim_col,
+                                     values="Выручка", aggfunc="sum")
+                     .reset_index().rename(columns={"_period": "Период"}))
+            sheets.append((f"Выручка × {dim_col}", pivot))
+        fn = (f"dynamics_{gran.lower()}_{dyn_from:%Y%m%d}_{dyn_to:%Y%m%d}.xlsx")
+        dl_btn_plain("Скачать Excel за период", sheets, filename=fn, key="dl_dyn")
 
 
 # =============================================================================

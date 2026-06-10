@@ -32,7 +32,7 @@ def line_ts(df: pd.DataFrame, x: str, y: str, color: str | None = None,
     """Простой временной ряд; color — колонка для разбивки на серии."""
     fig = go.Figure()
     if color:
-        for i, (name, grp) in enumerate(df.groupby(color, sort=False)):
+        for i, (name, grp) in enumerate(df.groupby(color, sort=False, observed=True)):
             fig.add_trace(go.Scatter(
                 x=grp[x], y=grp[y], name=str(name), mode="lines+markers",
                 marker=dict(size=5), line=dict(width=1.8),
@@ -120,6 +120,20 @@ def heatmap(pv: pd.DataFrame, colorscale: str = "YlOrRd",
     fig = apply_theme(fig, title, height=height or max(300, 28 * len(pv) + 80))
     fig.update_layout(hovermode="closest")
     return fig
+
+
+def stacked_bar(df: pd.DataFrame, x: str, y: str, color: str,
+                title: str = "", y_title: str = "") -> go.Figure:
+    """Stacked bar: x — категории, color — слои стека."""
+    fig = go.Figure()
+    for name, grp in df.groupby(color, sort=False, observed=True):
+        fig.add_trace(go.Bar(
+            x=grp[x], y=grp[y], name=str(name),
+            hovertemplate="%{x} · " + str(name) + ": %{y:,.0f}<extra></extra>",
+        ))
+    fig.update_layout(barmode="stack")
+    fig.update_yaxes(title=y_title or None)
+    return apply_theme(fig, title)
 
 
 def barh_top(df: pd.DataFrame, label_col: str, value_col: str, n: int = 10,

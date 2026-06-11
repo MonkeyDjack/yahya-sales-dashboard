@@ -74,15 +74,16 @@ def render_sidebar(df: pd.DataFrame, current_path: str) -> dict:
             st.info("📌 Открытая страница использует **свой период** — "
                     "глобальный период ниже на неё не влияет.")
 
-        st.caption(f"Быстрый период · от даты данных {max_d:%d.%m.%Y}")
-        for row in (PRESETS[:4], PRESETS[4:]):
-            cols = st.columns(len(row))
-            for col, preset in zip(cols, row):
-                if col.button(_PRESET_LABELS[preset], key=f"ps_{preset}",
-                              width="stretch"):
-                    ap["date_range"] = preset_range(preset, min_d, max_d)
-                    st.session_state.fv += 1
-                    st.rerun()
+        def _apply_preset():
+            p = st.session_state.get("ps_pick")
+            if p:
+                st.session_state.ap["date_range"] = preset_range(p, min_d, max_d)
+                st.session_state.fv += 1
+                st.session_state.ps_pick = None  # сброс выделения, чтобы чип не «залипал»
+
+        st.pills(f"Быстрый период · от даты данных {max_d:%d.%m.%Y}",
+                 PRESETS, format_func=lambda p: _PRESET_LABELS[p],
+                 key="ps_pick", on_change=_apply_preset)
 
         with st.form("filters_form", clear_on_submit=False):
             fv = st.session_state.fv

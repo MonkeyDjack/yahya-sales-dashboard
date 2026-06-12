@@ -193,32 +193,53 @@ def _points_tab(ctx: AppContext) -> None:
 # Товар по филиалам: продажи выбранной номенклатуры/категории в разрезе филиалов
 # ---------------------------------------------------------------------------
 def _product_by_branch_tab(ctx: AppContext) -> None:
-    st.caption("Выбери уровень и значения — продажи по филиалам за глобальный период "
-               f"({ctx.d_from:%d.%m.%Y} – {ctx.d_to:%d.%m.%Y}).")
+    st.caption("Каскад Группа → Категория → Подкатегория: матрица показывает ВСЮ номенклатуру "
+               f"выбранного за глобальный период ({ctx.d_from:%d.%m.%Y} – {ctx.d_to:%d.%m.%Y}). "
+               "Конкретные SKU выбирать не обязательно.")
     df_f = ctx.df_f
     if df_f.empty:
         st.info("Нет данных.")
         return
 
-    c1, c2 = st.columns([1, 2.5])
-    with c1:
-        level = st.selectbox("Уровень",
-                             ["Номенклатура", "Подкатегория", "Категория", "Группа"],
-                             key="nb_level")
-    with c2:
-        order = (df_f.groupby(level)["Сумма"].sum()
-                 .sort_values(ascending=False).index.astype(str).tolist())
-        sel = st.multiselect(f"{level} (отсортировано по выручке, {len(order)} шт)",
-                             order, key=f"nb_vals_{level}",
-                             placeholder="выбери одно или несколько значений…")
-    if not sel:
-        st.info("⬆️ Выбери хотя бы одно значение — например, категорию «Драже» или конкретный SKU.")
-        return
+    filters: dict[str, str] = {}
+    pool = df_f
+    fc1, fc2, fc3 = st.columns(3)
+    with fc1:
+        opts = ["— все —"] + sorted(pool["Группа"].dropna().astype(str).unique().tolist())
+        sel_g = st.selectbox("Группа", opts, key="nb_g")
+    if sel_g != "— все —":
+        pool = pool[pool["Группа"] == sel_g]
+        filters["Группа"] = sel_g
+    with fc2:
+        opts = ["— все —"] + sorted(pool["Категория"].dropna().astype(str).unique().tolist())
+        sel_c = st.selectbox("Категория", opts, key="nb_c")
+    if sel_c != "— все —":
+        pool = pool[pool["Категория"] == sel_c]
+        filters["Категория"] = sel_c
+    with fc3:
+        opts = ["— все —"] + sorted(pool["Подкатегория"].dropna().astype(str).unique().tolist())
+        sel_s = st.selectbox("Подкатегория", opts, key="nb_s")
+    if sel_s != "— все —":
+        pool = pool[pool["Подкатегория"] == sel_s]
+        filters["Подкатегория"] = sel_s
 
-    part = df_f[df_f[level].astype(str).isin(sel)]
+    sku_order = (pool.groupby("Номенклатура")["Сумма"].sum()
+                 .sort_values(ascending=False).index.astype(str).tolist())
+    sel_skus = st.multiselect(
+        f"Номенклатура — опционально (пусто = все {len(sku_order)} SKU выбранного)",
+        sku_order, key="nb_sku", placeholder="пусто — вся номенклатура выбранного")
+
+    part = pool[pool["Номенклатура"].astype(str).isin(sel_skus)] if sel_skus else pool
     if part.empty:
         st.info("По выбору нет продаж за период.")
         return
+    if not filters and not sel_skus:
+        st.info(f"ℹ️ Фильтры не выбраны — показываю все {len(sku_order)} SKU выборки. "
+                "Выбери группу/категорию, чтобы сузить.")
+
+    label = " / ".join(filters.values()) if filters else "вся выборка"
+    if sel_skus:
+        label += f" · {len(sel_skus)} SKU"
 
     # ---- KPI выбора ----
     rev = float(part["Сумма"].sum())
@@ -261,7 +282,10 @@ def _product_by_branch_tab(ctx: AppContext) -> None:
     cur = (ctx.d_from, ctx.d_to)
     prev = prev_period(*cur)
     part_prev = _slice(ctx.df_universe, prev)
-    part_prev = part_prev[part_prev[level].astype(str).isin(sel)]
+    for col, v in filters.items():
+        part_prev = part_prev[part_prev[col] == v]
+    if sel_skus:
+        part_prev = part_prev[part_prev["Номенклатура"].astype(str).isin(sel_skus)]
     prev_rev = part_prev.groupby("Филиал")["Сумма"].sum()
     _, exc_prev = lfl_split(ctx.ap["branches"], cur, prev)
 
@@ -312,8 +336,7 @@ def _product_by_branch_tab(ctx: AppContext) -> None:
     daily = daily.reset_index()
     daily["Дата"] = pd.to_datetime(daily["Дата"]).dt.strftime("%d.%m.%Y")
 
-    label = ", ".join(sel[:3]) + ("…" if len(sel) > 3 else "")
-    title = f"{level}: {label} · {ctx.d_from:%d.%m.%Y} – {ctx.d_to:%d.%m.%Y}"
+    title = f"{label} · {ctx.d_from:%d.%m.%Y} – {ctx.d_to:%d.%m.%Y}"
     g_x = g.copy()
     g_x["Первая"] = g_x["Первая"].dt.strftime("%d.%m.%Y")
     g_x["Последняя"] = g_x["Последняя"].dt.strftime("%d.%m.%Y")

@@ -58,6 +58,7 @@ CATEGORY_TO_GROUP: dict[str, str] = {
     "Шокочупсы":         GROUP_CHOCO,
     "Шоко Зверята":      GROUP_CHOCO,
     "Для Детей":         GROUP_CHOCO,
+    "Сигары":            GROUP_CHOCO,
 
     # --- Десерты и выпечка ---
     "Десерт":            GROUP_DESSERTS,

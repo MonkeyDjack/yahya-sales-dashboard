@@ -231,73 +231,97 @@ def _product_by_branch_tab(ctx: AppContext) -> None:
     k4.metric("Выручка / день", money(rev / ctx.days_cnt))
     k5.metric("Ср. цена", money(rev / qty) if qty else "—")
 
-    # ---- Таблица по филиалам + Δ% vs пред. период ----
+    branches_sel = [b for b in sorted(ctx.ap["branches"])]
+
+    # ---- Матрица Номенклатура × Филиал ----
+    def _matrix(value_col: str) -> pd.DataFrame:
+        pv = part.pivot_table(index="Номенклатура", columns="Филиал",
+                              values=value_col, aggfunc="sum", fill_value=0)
+        pv = pv.reindex(columns=branches_sel, fill_value=0)
+        pv = pv.loc[pv.sum(axis=1).sort_values(ascending=False).index]
+        pv["Итого"] = pv.sum(axis=1)
+        pv.loc["Итого"] = pv.sum()
+        return pv.round(0).astype("int64")
+
+    mx_qty = _matrix("Количество")
+    mx_rev = _matrix("Сумма")
+
+    st.markdown("**Матрица: Номенклатура × Филиал**")
+    mx_metric = st.radio("Метрика", ["Кол-во (шт)", "Выручка (сом)"],
+                         horizontal=True, key="nb_mx", label_visibility="collapsed")
+    mx = mx_qty if mx_metric == "Кол-во (шт)" else mx_rev
+    st.dataframe(mx, width="stretch",
+                 height=min(38 * (len(mx) + 1) + 40, 560))
+    zero_br = [b for b in branches_sel if mx_qty.loc["Итого", b] == 0]
+    if zero_br:
+        st.caption(f"⚪ Нет продаж выбранного: {', '.join(zero_br)}")
+
+    # ---- Сводка по филиалам ----
+    st.markdown("**Сводка по филиалам**")
     cur = (ctx.d_from, ctx.d_to)
     prev = prev_period(*cur)
-    kpi = kpi_group(part, ["Филиал"])
-
     part_prev = _slice(ctx.df_universe, prev)
     part_prev = part_prev[part_prev[level].astype(str).isin(sel)]
     prev_rev = part_prev.groupby("Филиал")["Сумма"].sum()
     _, exc_prev = lfl_split(ctx.ap["branches"], cur, prev)
 
-    col_tbl, col_chart = st.columns([1.4, 1])
-    with col_tbl:
-        rows = []
-        for _, r in kpi.iterrows():
-            br = r["Филиал"]
-            p = float(prev_rev.get(br, 0))
-            rows.append({
-                "Филиал": br,
-                "Выручка": money(r["Выручка"]),
-                "Доля": f"{r['Доля выручки'] * 100:.1f}%",
-                "⌀/день": money(r["Выручка"] / ctx.days_cnt),
-                "Δ% vs пред.": (f"⚠ {exc_prev[br]}" if br in exc_prev
-                                else pct((r["Выручка"] - p) / p * 100 if p else None)),
-                "Кол-во": num(r["Количество"]),
-                "Чеков": num(r["Чеков"]),
-            })
-        # филиалы выборки без продаж этого товара
-        zero = [b for b in ctx.ap["branches"] if b not in set(kpi["Филиал"])]
-        for br in zero:
-            rows.append({"Филиал": br, "Выручка": "—", "Доля": "0%", "⌀/день": "—",
-                         "Δ% vs пред.": "—", "Кол-во": "—", "Чеков": "—"})
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True,
-                     height=min(38 * (len(rows) + 1) + 40, 420))
-        st.caption(f"Δ% — vs {prev[0]:%d.%m}–{prev[1]:%d.%m.%Y} (равная длина). "
-                   f"⚠ — филиал несопоставим (открытие/закрытие).")
-    with col_chart:
-        chart_df = kpi.rename(columns={"Выручка": "Выручка, сом"})
-        st.plotly_chart(charts.barh_top(chart_df, "Филиал", "Выручка, сом", n=len(chart_df)),
-                        width="stretch")
+    g = (part.groupby("Филиал")
+         .agg(SKU=("Номенклатура", "nunique"), Шт=("Количество", "sum"),
+              Выручка=("Сумма", "sum"), Первая=("Дата", "min"), Последняя=("Дата", "max"))
+         .sort_values("Выручка", ascending=False).reset_index())
+    g["Доля выручки"] = g["Выручка"] / (g["Выручка"].sum() or 1)
+    g["Ср. цена"] = g["Выручка"] / g["Шт"].replace(0, pd.NA)
+    disp = pd.DataFrame({
+        "Филиал": g["Филиал"],
+        "SKU": g["SKU"],
+        "Шт": g["Шт"].apply(lambda v: num(v)),
+        "Выручка": g["Выручка"].apply(money),
+        "Доля": (g["Доля выручки"] * 100).round(1).astype(str) + "%",
+        "Ср. цена": g["Ср. цена"].apply(money),
+        "Δ% vs пред.": [(f"⚠ {exc_prev[b]}" if b in exc_prev
+                         else pct((v - float(prev_rev.get(b, 0))) / float(prev_rev.get(b, 0)) * 100
+                                  if float(prev_rev.get(b, 0)) else None))
+                        for b, v in zip(g["Филиал"], g["Выручка"])],
+        "Первая": g["Первая"].dt.strftime("%d.%m.%Y"),
+        "Последняя": g["Последняя"].dt.strftime("%d.%m.%Y"),
+    })
+    st.dataframe(disp, width="stretch", hide_index=True)
+    st.caption(f"Δ% — vs {prev[0]:%d.%m}–{prev[1]:%d.%m.%Y} (равная длина). "
+               f"⚠ — филиал несопоставим (открытие/закрытие).")
 
-    # ---- Динамика по филиалам ----
-    st.markdown("**Динамика по филиалам**")
+    # ---- Динамика по SKU ----
+    st.markdown("**Динамика по номенклатуре** (топ-8 по выручке)")
     freq = "D" if ctx.days_cnt <= 35 else ("W-MON" if ctx.days_cnt <= 370 else "MS")
-    ts = (part.groupby([pd.Grouper(key="Дата", freq=freq), "Филиал"])["Сумма"]
+    dyn_metric = "Количество" if mx_metric == "Кол-во (шт)" else "Сумма"
+    top_skus = [s for s in mx_qty.index if s != "Итого"][:8]
+    ts = (part[part["Номенклатура"].isin(top_skus)]
+          .groupby([pd.Grouper(key="Дата", freq=freq), "Номенклатура"])[dyn_metric]
           .sum().reset_index())
-    br_order = kpi["Филиал"].tolist()
-    ts["Филиал"] = pd.Categorical(ts["Филиал"], categories=br_order, ordered=True)
-    ts = ts.sort_values(["Филиал", "Дата"])
-    st.plotly_chart(charts.line_ts(ts, "Дата", "Сумма", color="Филиал", y_title="Выручка"),
-                    width="stretch")
+    ts["Номенклатура"] = pd.Categorical(ts["Номенклатура"], categories=top_skus, ordered=True)
+    ts = ts.sort_values(["Номенклатура", "Дата"])
+    st.plotly_chart(
+        charts.line_ts(ts, "Дата", dyn_metric, color="Номенклатура",
+                       y_title="шт" if dyn_metric == "Количество" else "Выручка, сом"),
+        width="stretch",
+    )
 
-    # ---- По точкам (детально) ----
-    with st.expander("Разбивка по точкам (Магазин / Кухня / Бар)"):
-        pt = kpi_group(part, ["Филиал", "Точки"])
-        disp = pt.copy()
-        disp["Выручка"] = disp["Выручка"].apply(money)
-        disp["Количество"] = disp["Количество"].apply(lambda v: num(v))
-        disp["Средний чек"] = disp["Средний чек"].apply(money)
-        disp["Доля выручки"] = (pt["Доля выручки"] * 100).round(1).astype(str) + "%"
-        disp = disp[["Филиал", "Точки", "Выручка", "Доля выручки", "Количество", "Чеков", "Средний чек"]]
-        st.dataframe(disp, width="stretch", hide_index=True)
+    # ---- Excel (структура как в reports/*_по_филиалам.xlsx) ----
+    daily = part.pivot_table(index="Дата", columns="Номенклатура",
+                             values="Количество", aggfunc="sum", fill_value=0).sort_index()
+    daily["Итого шт"] = daily.sum(axis=1)
+    daily = daily.reset_index()
+    daily["Дата"] = pd.to_datetime(daily["Дата"]).dt.strftime("%d.%m.%Y")
 
     label = ", ".join(sel[:3]) + ("…" if len(sel) > 3 else "")
+    title = f"{level}: {label} · {ctx.d_from:%d.%m.%Y} – {ctx.d_to:%d.%m.%Y}"
+    g_x = g.copy()
+    g_x["Первая"] = g_x["Первая"].dt.strftime("%d.%m.%Y")
+    g_x["Последняя"] = g_x["Последняя"].dt.strftime("%d.%m.%Y")
     dl_btn("Скачать отчёт по филиалам",
-           [("По филиалам", kpi, f"{level}: {label} · {ctx.d_from:%d.%m}–{ctx.d_to:%d.%m.%Y}"),
-            ("Динамика", ts.rename(columns={"Сумма": "Выручка"}), "Выручка по периодам"),
-            ("По точкам", kpi_group(part, ["Филиал", "Точки"]), "Филиал × Точки")],
+           [("Сводка по филиалам", g_x, title),
+            ("Кол-во (шт)", mx_qty.reset_index(), f"{title} — продано штук"),
+            ("Выручка (сом)", mx_rev.reset_index(), f"{title} — выручка"),
+            ("По дням (шт)", daily, f"{title} — штук по дням")],
            filename=f"product_by_branch_{ctx.d_from:%Y%m%d}_{ctx.d_to:%Y%m%d}.xlsx",
            key="dl_nb")
 

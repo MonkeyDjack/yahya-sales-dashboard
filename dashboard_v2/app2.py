@@ -43,11 +43,16 @@ cost_ref = data.load_cost_reference()
 # Pin: ключи виджетов с паттерном «инициализация по key» нужно переприсвоить
 # на каждом ране, иначе Streamlit удаляет state виджетов, не отрисованных
 # в текущем ране (т.е. при уходе на другую страницу периоды бы сбрасывались).
-_PIN_PREFIXES = ("abc_single_", "abc_cmp_p")
-_PIN_KEYS = {"dyn_from", "dyn_to", "pl_count"}
-for _k in list(st.session_state.keys()):
-    if _k.startswith(_PIN_PREFIXES) or _k in _PIN_KEYS:
-        st.session_state[_k] = st.session_state[_k]
+# ВАЖНО: только точные ключи date-пикеров/счётчиков! Ключи кнопок переприсваивать
+# нельзя — Streamlit кидает StreamlitValueAssignmentNotAllowedError.
+_PIN_KEYS = {
+    "abc_single_from", "abc_single_to",
+    "abc_cmp_p1_from", "abc_cmp_p1_to",
+    "abc_cmp_p2_from", "abc_cmp_p2_to",
+    "dyn_from", "dyn_to", "pl_count",
+}
+for _k in _PIN_KEYS & set(st.session_state.keys()):
+    st.session_state[_k] = st.session_state[_k]
 
 _CTX: dict = {}
 

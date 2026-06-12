@@ -15,12 +15,14 @@ from core.periods import prev_period, yoy_period
 
 def render(ctx: AppContext) -> None:
     st.subheader("🏢 Филиалы и время")
-    tab_br, tab_pts, tab_hours = st.tabs(
-        ["🏆 Филиалы", "📍 Точки по филиалам", "⏰ Пики времени"])
+    tab_br, tab_pts, tab_prod, tab_hours = st.tabs(
+        ["🏆 Филиалы", "📍 Точки по филиалам", "🔎 Товар по филиалам", "⏰ Пики времени"])
     with tab_br:
         _branches_tab(ctx)
     with tab_pts:
         _points_tab(ctx)
+    with tab_prod:
+        _product_by_branch_tab(ctx)
     with tab_hours:
         _hours_tab(ctx)
 
@@ -185,6 +187,119 @@ def _points_tab(ctx: AppContext) -> None:
     dl_btn("Скачать точки",
            [("Точки по филиалам", exp, "Точки в разрезе филиалов")],
            filename=f"points_{ctx.d_from:%Y%m%d}_{ctx.d_to:%Y%m%d}.xlsx", key="dl_pts")
+
+
+# ---------------------------------------------------------------------------
+# Товар по филиалам: продажи выбранной номенклатуры/категории в разрезе филиалов
+# ---------------------------------------------------------------------------
+def _product_by_branch_tab(ctx: AppContext) -> None:
+    st.caption("Выбери уровень и значения — продажи по филиалам за глобальный период "
+               f"({ctx.d_from:%d.%m.%Y} – {ctx.d_to:%d.%m.%Y}).")
+    df_f = ctx.df_f
+    if df_f.empty:
+        st.info("Нет данных.")
+        return
+
+    c1, c2 = st.columns([1, 2.5])
+    with c1:
+        level = st.selectbox("Уровень",
+                             ["Номенклатура", "Подкатегория", "Категория", "Группа"],
+                             key="nb_level")
+    with c2:
+        order = (df_f.groupby(level)["Сумма"].sum()
+                 .sort_values(ascending=False).index.astype(str).tolist())
+        sel = st.multiselect(f"{level} (отсортировано по выручке, {len(order)} шт)",
+                             order, key=f"nb_vals_{level}",
+                             placeholder="выбери одно или несколько значений…")
+    if not sel:
+        st.info("⬆️ Выбери хотя бы одно значение — например, категорию «Драже» или конкретный SKU.")
+        return
+
+    part = df_f[df_f[level].astype(str).isin(sel)]
+    if part.empty:
+        st.info("По выбору нет продаж за период.")
+        return
+
+    # ---- KPI выбора ----
+    rev = float(part["Сумма"].sum())
+    qty = float(part["Количество"].sum())
+    total_rev = float(df_f["Сумма"].sum())
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Выручка", money(rev))
+    k2.metric("Доля от выборки", f"{rev / total_rev * 100:.1f}%" if total_rev else "—")
+    k3.metric("Количество", num(qty))
+    k4.metric("Выручка / день", money(rev / ctx.days_cnt))
+    k5.metric("Ср. цена", money(rev / qty) if qty else "—")
+
+    # ---- Таблица по филиалам + Δ% vs пред. период ----
+    cur = (ctx.d_from, ctx.d_to)
+    prev = prev_period(*cur)
+    kpi = kpi_group(part, ["Филиал"])
+
+    part_prev = _slice(ctx.df_universe, prev)
+    part_prev = part_prev[part_prev[level].astype(str).isin(sel)]
+    prev_rev = part_prev.groupby("Филиал")["Сумма"].sum()
+    _, exc_prev = lfl_split(ctx.ap["branches"], cur, prev)
+
+    col_tbl, col_chart = st.columns([1.4, 1])
+    with col_tbl:
+        rows = []
+        for _, r in kpi.iterrows():
+            br = r["Филиал"]
+            p = float(prev_rev.get(br, 0))
+            rows.append({
+                "Филиал": br,
+                "Выручка": money(r["Выручка"]),
+                "Доля": f"{r['Доля выручки'] * 100:.1f}%",
+                "⌀/день": money(r["Выручка"] / ctx.days_cnt),
+                "Δ% vs пред.": (f"⚠ {exc_prev[br]}" if br in exc_prev
+                                else pct((r["Выручка"] - p) / p * 100 if p else None)),
+                "Кол-во": num(r["Количество"]),
+                "Чеков": num(r["Чеков"]),
+            })
+        # филиалы выборки без продаж этого товара
+        zero = [b for b in ctx.ap["branches"] if b not in set(kpi["Филиал"])]
+        for br in zero:
+            rows.append({"Филиал": br, "Выручка": "—", "Доля": "0%", "⌀/день": "—",
+                         "Δ% vs пред.": "—", "Кол-во": "—", "Чеков": "—"})
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True,
+                     height=min(38 * (len(rows) + 1) + 40, 420))
+        st.caption(f"Δ% — vs {prev[0]:%d.%m}–{prev[1]:%d.%m.%Y} (равная длина). "
+                   f"⚠ — филиал несопоставим (открытие/закрытие).")
+    with col_chart:
+        chart_df = kpi.rename(columns={"Выручка": "Выручка, сом"})
+        st.plotly_chart(charts.barh_top(chart_df, "Филиал", "Выручка, сом", n=len(chart_df)),
+                        width="stretch")
+
+    # ---- Динамика по филиалам ----
+    st.markdown("**Динамика по филиалам**")
+    freq = "D" if ctx.days_cnt <= 35 else ("W-MON" if ctx.days_cnt <= 370 else "MS")
+    ts = (part.groupby([pd.Grouper(key="Дата", freq=freq), "Филиал"])["Сумма"]
+          .sum().reset_index())
+    br_order = kpi["Филиал"].tolist()
+    ts["Филиал"] = pd.Categorical(ts["Филиал"], categories=br_order, ordered=True)
+    ts = ts.sort_values(["Филиал", "Дата"])
+    st.plotly_chart(charts.line_ts(ts, "Дата", "Сумма", color="Филиал", y_title="Выручка"),
+                    width="stretch")
+
+    # ---- По точкам (детально) ----
+    with st.expander("Разбивка по точкам (Магазин / Кухня / Бар)"):
+        pt = kpi_group(part, ["Филиал", "Точки"])
+        disp = pt.copy()
+        disp["Выручка"] = disp["Выручка"].apply(money)
+        disp["Количество"] = disp["Количество"].apply(lambda v: num(v))
+        disp["Средний чек"] = disp["Средний чек"].apply(money)
+        disp["Доля выручки"] = (pt["Доля выручки"] * 100).round(1).astype(str) + "%"
+        disp = disp[["Филиал", "Точки", "Выручка", "Доля выручки", "Количество", "Чеков", "Средний чек"]]
+        st.dataframe(disp, width="stretch", hide_index=True)
+
+    label = ", ".join(sel[:3]) + ("…" if len(sel) > 3 else "")
+    dl_btn("Скачать отчёт по филиалам",
+           [("По филиалам", kpi, f"{level}: {label} · {ctx.d_from:%d.%m}–{ctx.d_to:%d.%m.%Y}"),
+            ("Динамика", ts.rename(columns={"Сумма": "Выручка"}), "Выручка по периодам"),
+            ("По точкам", kpi_group(part, ["Филиал", "Точки"]), "Филиал × Точки")],
+           filename=f"product_by_branch_{ctx.d_from:%Y%m%d}_{ctx.d_to:%Y%m%d}.xlsx",
+           key="dl_nb")
 
 
 # ---------------------------------------------------------------------------
